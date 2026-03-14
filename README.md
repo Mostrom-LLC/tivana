@@ -14,98 +14,209 @@ Existing browser automation tools are built for testing, not agency:
 
 Humans catch bugs that tests miss because we see the whole page, notice things that "feel off," and have continuous awareness. Tivana gives agents the same capability.
 
-## 3-Step Setup
+## Quick Start
+
+### 1. Build the Runtime
 
 ```bash
-npm install tivana
-npx tivana
+# Clone the repo
+git clone https://github.com/Mostrom-LLC/tivana.git
+cd tivana/runtime
+
+# Build with Rust (requires Rust 1.75+)
+cargo build --release
 ```
 
+### 2. Start the Runtime
+
+```bash
+# Headed mode (see the browser)
+./target/release/tivana start
+
+# Headless mode
+./target/release/tivana start --headless
+
+# Custom port
+./target/release/tivana start --port 8080
+```
+
+### 3. Install the SDK
+
+```bash
+# Using npm
+npm install tivana
+
+# Using bun
+bun add tivana
+
+# Or use local SDK
+cd sdk/ts && bun install
+```
+
+### 4. Connect and Interact
+
 ```typescript
-import { observe, act } from "tivana";
+import { TivanaClient } from "tivana";
 
-// Receive streaming page state
-observe((page) => {
-  console.log(`Now at: ${page.url}`);
-  console.log(`Elements: ${page.elements.length}`);
-});
+const client = new TivanaClient();
+await client.connect();
 
-// Take actions by element reference
-await act.click("e3");
-await act.type("hello world");
+// Create a browser session
+await client.createSession();
+
+// Navigate and perceive
+await client.navigate("https://github.com");
+const state = await client.pageState();
+const elements = await client.elements();
+
+console.log(`URL: ${state.url}`);
+console.log(`Elements: ${elements.length}`);
+
+// Interact
+const signIn = elements.find(e => e.name?.includes("Sign in"));
+if (signIn) {
+  await client.click(signIn.id);
+}
+
+// Clean up
+await client.closeSession();
+client.disconnect();
 ```
 
 ## What the Agent Sees
 
 ```typescript
+// Page State
 {
   url: "https://github.com/login",
   title: "Sign in to GitHub",
-  
-  elements: [
-    {
-      id: "e1",
-      role: "textbox",
-      label: "Username",
-      focused: true,
-      bounds: { x: 200, y: 150, width: 280, height: 40 },
-      font: { family: "Inter", size: "16px", weight: 400, color: "#24292f" },
-      background: "#ffffff",
-      border: { width: "1px", color: "#d0d7de", radius: "6px" }
-    },
-    // ... full visual + semantic data for every element
-  ]
+  scrollX: 0,
+  scrollY: 0,
+  viewportWidth: 1280,
+  viewportHeight: 720,
+  timestampMs: 1710412800000
 }
+
+// Elements
+[
+  {
+    id: "e1",
+    role: "textbox",
+    name: "Username or email address",
+    focused: false,
+    enabled: true,
+    bounds: { x: 200, y: 150, width: 280, height: 40 },
+    styles: {
+      fontFamily: "Inter, sans-serif",
+      fontSize: "16px",
+      color: "rgb(36, 41, 47)",
+      backgroundColor: "rgb(255, 255, 255)"
+    }
+  },
+  // ... more elements
+]
 ```
 
 ## Full Visual Awareness
 
 Unlike accessibility-tree-only approaches, Tivana includes computed styles:
 
-- **Typography** — font family, size, weight, color, line-height
+- **Typography** — font family, size, weight, color
 - **Colors** — background, foreground, border colors
-- **Geometry** — bounds, padding, margin
-- **Borders** — width, style, color, radius
-- **Layout** — display, flex properties, alignment
-- **Accessibility** — contrast ratio, focus visibility, ARIA attributes
+- **Geometry** — bounds (position, size)
+- **State** — focused, enabled, checked, expanded
 
 This enables use cases like visual regression testing, accessibility auditing, and design system validation.
 
+## SDK API
+
+### Session
+
+```typescript
+await client.createSession({ headless: true });
+await client.closeSession();
+const sessions = await client.listSessions();
+```
+
+### Perception
+
+```typescript
+const state = await client.pageState();      // URL, title, scroll, viewport
+const elements = await client.elements();    // Interactive elements
+const metadata = await client.metadata();    // Meta tags, favicon, og:image
+const text = await client.textContent();     // Page text content
+```
+
+### Actions
+
+```typescript
+await client.navigate("https://example.com");
+await client.click("e5");                    // By element ID
+await client.click({ role: "button", label: "Submit" });  // By role+label
+await client.type("hello", "e3");            // Type into element
+await client.press("Enter");                 // Press key
+await client.scroll("e10");                  // Scroll element into view
+await client.hover("e5");                    // Hover over element
+await client.select("e7", "option-value");   // Select dropdown option
+await client.waitFor({ type: "Navigation" }); // Wait for condition
+```
+
+## CLI Reference
+
+```bash
+tivana start [OPTIONS]
+
+Options:
+  --port <PORT>        WebSocket server port (default: 9876)
+  --headless           Run browser in headless mode
+  --headed             Run browser in headed mode (default)
+  --chrome-path <PATH> Path to Chrome/Chromium executable
+  -h, --help           Print help
+  -V, --version        Print version
+```
+
 ## Requirements
 
-- Chromium-based browser (Chrome, Edge, Brave, Arc)
-- Node.js 18+
+- **Rust** 1.70+ (for building)
+- **Node.js** 18+ or **Bun** 1.0+ (for SDK)
+- **Chromium-based browser** (Chrome, Edge, Brave)
 - macOS, Linux, or Windows
-- No browser extensions required
 
 ## Architecture
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
 │   Browser    │────►│   Runtime    │────►│    Agent     │
-│  (Chromium)  │◄────│  (tivana)    │◄────│   (LLM/AI)   │
+│  (Chromium)  │◄────│   (Rust)     │◄────│  (TS SDK)    │
 └──────────────┘     └──────────────┘     └──────────────┘
+     CDP              WebSocket             Your Code
 ```
 
-- **Runtime**: Rust + Raw CDP (chromiumoxide, tokio)
-- **Agent SDK**: TypeScript (thin WebSocket client)
+- **Runtime**: Rust + CDP (chromiumoxide, tokio)
+- **SDK**: TypeScript (WebSocket client)
 - **Protocol**: JSON over WebSocket
+
+## Running Tests
+
+```bash
+# Rust unit tests
+cargo test
+
+# SDK smoke test (requires runtime)
+./target/release/tivana start &
+cd sdk/ts
+bun run smoke-test.ts
+```
 
 ## Documentation
 
-See the [docs](./docs) folder for detailed documentation:
+See the [docs](./docs) folder:
 
-- [What It Is](./docs/what-it-is.md) — Overview and supported agents
 - [Protocol Specification](./docs/protocol-specification.md) — Message formats
-- [Element Model](./docs/element-model.md) — Full visual + semantic schema
-- [Action Primitives](./docs/action-primitives.md) — Available agent actions
-- [Architecture](./docs/architecture.md) — Runtime, CDP, data flow
+- [Element Model](./docs/element-model.md) — Element structure
+- [Action Primitives](./docs/action-primitives.md) — Available actions
 - [Integration Guide](./docs/integration-guide.md) — How to connect an agent
-- [Developer Experience](./docs/developer-experience.md) — 3-step setup, visual awareness
-- [Use Cases](./docs/use-cases.md) — Accessibility, visual regression, exploratory QA
-- [Success Criteria](./docs/success-criteria.md) — DX, perception, action targets
-- [Edge Cases](./docs/edge-cases.md) — Dynamic content, auth, complex UIs
-- [Tech Stack](./docs/tech-stack.md) — Rust runtime, TypeScript SDK
+- [Architecture](./docs/architecture.md) — Runtime design
 
 ## License
 
