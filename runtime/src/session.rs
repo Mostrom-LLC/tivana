@@ -9,12 +9,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::browser::{BrowserHandle, PageHandle};
 use crate::error::{ProtocolError, TivanaError};
+use crate::perceive::{MutationEvent, MutationObserverHandle};
 
 /// Session lifecycle states
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +47,12 @@ pub struct Session {
 
     /// Session configuration
     pub config: SessionConfig,
+
+    /// Mutation observer handle (for stopping)
+    pub mutation_observer_handle: Option<MutationObserverHandle>,
+
+    /// Mutation events receiver
+    pub mutation_rx: Option<mpsc::Receiver<MutationEvent>>,
 }
 
 // Manual Debug implementation since BrowserHandle contains non-Debug types
@@ -57,6 +64,7 @@ impl std::fmt::Debug for Session {
             .field("browser", &self.browser.is_some())
             .field("created_at", &self.created_at)
             .field("config", &self.config)
+            .field("mutation_observer", &self.mutation_observer_handle.is_some())
             .finish()
     }
 }
@@ -86,6 +94,8 @@ impl Session {
             browser: None,
             created_at: std::time::Instant::now(),
             config,
+            mutation_observer_handle: None,
+            mutation_rx: None,
         }
     }
 
@@ -118,6 +128,39 @@ impl Session {
     pub fn close(&mut self) {
         self.state = SessionState::Closed;
         self.browser = None;
+        // Stop mutation observer if running
+        if let Some(handle) = self.mutation_observer_handle.take() {
+            handle.stop();
+        }
+        self.mutation_rx = None;
+    }
+
+    /// Start mutation observation
+    pub fn start_mutation_observer(
+        &mut self,
+        rx: mpsc::Receiver<MutationEvent>,
+        handle: MutationObserverHandle,
+    ) {
+        self.mutation_rx = Some(rx);
+        self.mutation_observer_handle = Some(handle);
+    }
+
+    /// Stop mutation observation
+    pub fn stop_mutation_observer(&mut self) {
+        if let Some(handle) = self.mutation_observer_handle.take() {
+            handle.stop();
+        }
+        self.mutation_rx = None;
+    }
+
+    /// Check if mutation observer is running
+    pub fn is_mutation_observer_running(&self) -> bool {
+        self.mutation_observer_handle.is_some()
+    }
+
+    /// Take the mutation receiver (for streaming)
+    pub fn take_mutation_rx(&mut self) -> Option<mpsc::Receiver<MutationEvent>> {
+        self.mutation_rx.take()
     }
 
     /// Check if session is active

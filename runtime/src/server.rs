@@ -15,7 +15,7 @@ use crate::act::{ActionTarget, Actor, ClickOptions, ScrollDirection, ScrollOptio
 use crate::browser::{BrowserLaunchConfig, BrowserManager};
 use crate::cli::Args;
 use crate::error::{ProtocolError, TivanaError};
-use crate::perceive::Perceiver;
+use crate::perceive::{setup_mutation_observer, stop_mutation_observer, Perceiver};
 use crate::protocol::{
     parse_request, serialize_outbound, EventMessage, OutboundMessage, ResponseMessage,
     PROTOCOL_VERSION,
@@ -194,6 +194,9 @@ impl Server {
             "perceive.accessibility" => self.handle_perceive_accessibility(&request).await,
             "perceive.text" => self.handle_perceive_text(&request).await,
             "perceive.metadata" => self.handle_perceive_metadata(&request).await,
+            "perceive.mutations" => self.handle_perceive_mutations(&request).await,
+            "perceive.mutations.poll" => self.handle_perceive_mutations_poll(&request).await,
+            "perceive.mutations.stop" => self.handle_perceive_mutations_stop(&request).await,
 
             // Action methods
             "act.click" => self.handle_act_click(&request).await,
@@ -513,6 +516,136 @@ impl Server {
             .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
 
         Ok(serde_json::to_value(&metadata).unwrap_or_default())
+    }
+
+    async fn handle_perceive_mutations(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        // Check if already running
+        let already_running = self
+            .sessions
+            .with_session(&session_id, |session| {
+                Ok(session.is_mutation_observer_running())
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        if already_running {
+            return Ok(serde_json::json!({
+                "status": "already_running",
+                "sessionId": session_id
+            }));
+        }
+
+        // Get the page
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        // Set up the mutation observer
+        let (rx, handle) = setup_mutation_observer(&page)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+
+        // Store the observer handle in the session
+        self.sessions
+            .with_session(&session_id, |session| {
+                session.start_mutation_observer(rx, handle);
+                Ok(())
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        info!(session_id = %session_id, "Mutation observer started");
+
+        Ok(serde_json::json!({
+            "status": "started",
+            "sessionId": session_id,
+            "message": "Mutation events will be streamed as server events"
+        }))
+    }
+
+    async fn handle_perceive_mutations_poll(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        // Maximum mutations to return per poll
+        let limit = request
+            .params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(100);
+
+        // Collect mutations from the receiver
+        let mut mutations = Vec::new();
+
+        self.sessions
+            .with_session(&session_id, |session| {
+                if let Some(rx) = session.mutation_rx.as_mut() {
+                    // Non-blocking poll for available mutations
+                    while mutations.len() < limit {
+                        match rx.try_recv() {
+                            Ok(event) => mutations.push(event),
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                // Observer stopped
+                                break;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        Ok(serde_json::json!({
+            "mutations": mutations,
+            "count": mutations.len()
+        }))
+    }
+
+    async fn handle_perceive_mutations_stop(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        // Get the page to cleanup JS side
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        // Stop the JavaScript observer
+        stop_mutation_observer(&page)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+
+        // Stop the session-side observer
+        self.sessions
+            .with_session(&session_id, |session| {
+                session.stop_mutation_observer();
+                Ok(())
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        info!(session_id = %session_id, "Mutation observer stopped");
+
+        Ok(serde_json::json!({
+            "status": "stopped",
+            "sessionId": session_id
+        }))
     }
 
     // Action handlers
