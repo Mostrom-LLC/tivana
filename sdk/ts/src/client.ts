@@ -7,7 +7,8 @@
 
 import type {
   ActionResult,
-  ClickParams,
+  ActionTarget,
+  ClickOptions,
   ClickTarget,
   ClientOptions,
   Element,
@@ -16,13 +17,17 @@ import type {
   MutationEvent,
   OutgoingMessage,
   PageState,
-  ScrollBehavior,
-  ScrollParams,
+  ScrollDirection,
   SessionCreateParams,
   SessionCreateResult,
-  TypeParams,
+  SessionInfo,
+  TypeOptions,
+  AccessibilitySnapshot,
+  TextContent,
+  PageMetadata,
+  ElementInfo,
 } from "./types";
-import { ErrorCode, PROTOCOL_VERSION } from "./types";
+import { PROTOCOL_VERSION } from "./types";
 
 /** Default client options */
 const DEFAULT_OPTIONS: Required<ClientOptions> = {
@@ -168,14 +173,17 @@ export class TivanaClient {
       return;
     }
 
-    // Handle events (mutations)
-    if (message.type === "event" && message.method === "page.mutation") {
-      const event = message.result as MutationEvent;
-      for (const callback of this.mutationCallbacks) {
-        try {
-          callback(event);
-        } catch (e) {
-          console.error("Mutation callback error:", e);
+    // Handle events (mutations, page events, etc.)
+    if (message.type === "event") {
+      // Handle mutation events
+      if (message.event === "page.mutation" || message.event === "mutations") {
+        const events = (message.data as MutationEvent[]) || [];
+        for (const callback of this.mutationCallbacks) {
+          try {
+            callback(events);
+          } catch (e) {
+            console.error("Mutation callback error:", e);
+          }
         }
       }
       return;
@@ -191,13 +199,9 @@ export class TivanaClient {
     clearTimeout(pending.timeout);
     this.pending.delete(message.id);
 
-    if (message.type === "error" || message.error) {
-      const error = message.error || {
-        code: ErrorCode.InternalError,
-        message: "Unknown error",
-      };
+    if (message.error) {
       pending.reject(
-        new Error(`[${error.code}] ${error.message}`)
+        new Error(`[${message.error.code}] ${message.error.message}`)
       );
     } else {
       pending.resolve(message.result);
@@ -217,7 +221,8 @@ export class TivanaClient {
       id,
       type: "request",
       method,
-      params,
+      params: params ?? {},
+      version: PROTOCOL_VERSION,
     };
 
     if (this.sessionId && method !== "session.create") {
@@ -273,8 +278,10 @@ export class TivanaClient {
   /**
    * List all sessions
    */
-  async listSessions(): Promise<string[]> {
-    const result = await this.request<{ sessions: string[] }>("session.list");
+  async listSessions(): Promise<SessionInfo[]> {
+    const result = await this.request<{ sessions: SessionInfo[] }>(
+      "session.list"
+    );
     return result.sessions;
   }
 
@@ -290,13 +297,38 @@ export class TivanaClient {
   }
 
   /**
-   * Get element tree with full visual and semantic data
+   * Get interactive elements on the page
    */
   async elements(): Promise<Element[]> {
-    const result = await this.request<{ elements: Element[] }>(
-      "perceive.elements"
-    );
-    return result.elements;
+    return this.request<Element[]>("perceive.elements");
+  }
+
+  /**
+   * Get full accessibility tree snapshot
+   */
+  async accessibilitySnapshot(): Promise<AccessibilitySnapshot> {
+    return this.request<AccessibilitySnapshot>("perceive.accessibilitySnapshot");
+  }
+
+  /**
+   * Get page text content
+   */
+  async textContent(): Promise<TextContent> {
+    return this.request<TextContent>("perceive.textContent");
+  }
+
+  /**
+   * Get page metadata
+   */
+  async metadata(): Promise<PageMetadata> {
+    return this.request<PageMetadata>("perceive.metadata");
+  }
+
+  /**
+   * Find elements matching a selector
+   */
+  async findElements(selector: string): Promise<ElementInfo[]> {
+    return this.request<ElementInfo[]>("perceive.findElements", { selector });
   }
 
   /**
@@ -326,37 +358,156 @@ export class TivanaClient {
   /**
    * Click an element
    *
-   * @param target Element ID (e.g., "e5") or selector ({ role: "button", label: "Submit" })
+   * @param target Element ID (e.g., "e5"), selector string, or { role, label } object
    * @param options Click options
    */
   async click(
     target: ClickTarget,
-    options?: Omit<ClickParams, "target">
+    options?: ClickOptions
   ): Promise<ActionResult> {
-    const params: ClickParams = { target, ...options };
-    return this.request<ActionResult>("act.click", params);
+    // Convert ClickTarget to ActionTarget
+    const actionTarget: ActionTarget =
+      typeof target === "string"
+        ? target.startsWith("e") && /^e\d+$/.test(target)
+          ? { elementId: target }
+          : { selector: target }
+        : { role: target.role, label: target.label };
+
+    return this.request<ActionResult>("act.click", {
+      target: actionTarget,
+      ...options,
+    });
   }
 
   /**
-   * Type text
+   * Type text into the focused element or a target element
    *
    * @param text Text to type
-   * @param target Optional element ID to focus first
+   * @param target Optional element ID or selector to focus first
+   * @param options Type options
    */
-  async type(text: string, target?: string): Promise<ActionResult> {
-    const params: TypeParams = { text, target };
-    return this.request<ActionResult>("act.type", params);
+  async type(
+    text: string,
+    target?: string,
+    options?: TypeOptions
+  ): Promise<ActionResult> {
+    const actionTarget: ActionTarget | undefined = target
+      ? target.startsWith("e") && /^e\d+$/.test(target)
+        ? { elementId: target }
+        : { selector: target }
+      : undefined;
+
+    return this.request<ActionResult>("act.type", {
+      text,
+      target: actionTarget,
+      ...options,
+    });
   }
 
   /**
-   * Scroll element into view
+   * Press a key or key combination
+   *
+   * @param key Key to press (e.g., "Enter", "Tab", "a")
+   * @param modifiers Modifier keys (e.g., ["Control", "Shift"])
+   */
+  async press(key: string, modifiers?: string[]): Promise<ActionResult> {
+    return this.request<ActionResult>("act.press", {
+      key,
+      modifiers: modifiers || [],
+    });
+  }
+
+  /**
+   * Scroll the page or element into view
+   *
+   * @param target Element ID or selector to scroll into view
+   * @param direction Scroll direction (if target not specified)
+   * @param options Scroll options
    */
   async scroll(
-    target: string,
-    behavior?: ScrollBehavior
+    target?: string,
+    direction?: ScrollDirection,
+    options?: { amount?: number; smooth?: boolean }
   ): Promise<ActionResult> {
-    const params: ScrollParams = { target, behavior };
-    return this.request<ActionResult>("act.scroll", params);
+    const actionTarget: ActionTarget | undefined = target
+      ? target.startsWith("e") && /^e\d+$/.test(target)
+        ? { elementId: target }
+        : { selector: target }
+      : undefined;
+
+    return this.request<ActionResult>("act.scroll", {
+      target: actionTarget,
+      direction,
+      ...options,
+    });
+  }
+
+  /**
+   * Hover over an element
+   *
+   * @param target Element ID or selector
+   */
+  async hover(target: string): Promise<ActionResult> {
+    const actionTarget: ActionTarget = target.startsWith("e") &&
+      /^e\d+$/.test(target)
+      ? { elementId: target }
+      : { selector: target };
+
+    return this.request<ActionResult>("act.hover", { target: actionTarget });
+  }
+
+  /**
+   * Focus an element
+   *
+   * @param target Element ID or selector
+   */
+  async focus(target: string): Promise<ActionResult> {
+    const actionTarget: ActionTarget = target.startsWith("e") &&
+      /^e\d+$/.test(target)
+      ? { elementId: target }
+      : { selector: target };
+
+    return this.request<ActionResult>("act.focus", { target: actionTarget });
+  }
+
+  /**
+   * Select an option from a dropdown
+   *
+   * @param target Element ID or selector
+   * @param value Value to select
+   */
+  async select(target: string, value: string): Promise<ActionResult> {
+    const actionTarget: ActionTarget = target.startsWith("e") &&
+      /^e\d+$/.test(target)
+      ? { elementId: target }
+      : { selector: target };
+
+    return this.request<ActionResult>("act.select", {
+      target: actionTarget,
+      value,
+    });
+  }
+
+  /**
+   * Wait for a condition
+   *
+   * @param condition Wait condition
+   * @param timeoutMs Timeout in milliseconds (default: 30000)
+   */
+  async waitFor(
+    condition:
+      | { type: "Element"; selector: string }
+      | { type: "Visible"; selector: string }
+      | { type: "Hidden"; selector: string }
+      | { type: "Navigation" }
+      | { type: "NetworkIdle"; idleTimeMs?: number }
+      | { type: "Delay"; durationMs: number },
+    timeoutMs?: number
+  ): Promise<ActionResult> {
+    return this.request<ActionResult>("act.waitFor", {
+      condition,
+      timeoutMs: timeoutMs || this.options.timeout,
+    });
   }
 
   //===========================================================================
@@ -433,7 +584,7 @@ export async function observe(
   await callback(page, elements);
 
   // Subscribe to mutations
-  return client.onMutation(async (event) => {
+  return client.onMutation(async () => {
     const [page, elements] = await Promise.all([
       client.pageState(),
       client.elements(),
@@ -458,7 +609,26 @@ export const act = {
     return getClient().navigate(url);
   },
 
-  async scroll(target: string, behavior?: ScrollBehavior): Promise<ActionResult> {
-    return getClient().scroll(target, behavior);
+  async scroll(
+    target?: string,
+    direction?: ScrollDirection
+  ): Promise<ActionResult> {
+    return getClient().scroll(target, direction);
+  },
+
+  async press(key: string, modifiers?: string[]): Promise<ActionResult> {
+    return getClient().press(key, modifiers);
+  },
+
+  async hover(target: string): Promise<ActionResult> {
+    return getClient().hover(target);
+  },
+
+  async focus(target: string): Promise<ActionResult> {
+    return getClient().focus(target);
+  },
+
+  async select(target: string, value: string): Promise<ActionResult> {
+    return getClient().select(target, value);
   },
 };
