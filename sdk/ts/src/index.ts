@@ -39,37 +39,47 @@ export type {
   IncomingMessage,
   OutgoingMessage,
   ProtocolError,
+  ErrorCodeType,
 
   // Session
   SessionStatus,
   SessionCreateParams,
   SessionCreateResult,
+  SessionInfo,
 
   // Page State
   PageState,
-  ScrollPosition,
-  Viewport,
+  BoundingBox,
+  ElementStyles,
 
   // Elements
   Element,
-  Bounds,
-  Spacing,
-  FontStyle,
-  BorderStyle,
+  AccessibilitySnapshot,
+  ElementInfo,
+  TextContent,
+  PageMetadata,
 
   // Mutations
-  Mutation,
   MutationEvent,
   MutationCallback,
 
   // Actions
+  ActionTarget,
   ClickTarget,
-  MouseButton,
+  ClickOptions,
   ClickParams,
+  TypeOptions,
   TypeParams,
-  ScrollBehavior,
+  ScrollDirection,
+  ScrollOptions,
   ScrollParams,
+  PressParams,
+  SelectParams,
+  WaitCondition,
+  WaitParams,
   ActionResult,
+  NavigationResult,
+  FindElementsParams,
 
   // Options
   ClientOptions,
