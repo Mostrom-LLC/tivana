@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::debug;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tracing::{debug, warn};
 
 use crate::browser::PageHandle;
 use crate::error::TivanaError;
@@ -179,16 +181,19 @@ pub struct PageMetadata {
 
 /// Mutation event for DOM changes
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum MutationEvent {
     /// Element was added
+    #[serde(rename_all = "camelCase")]
     Added {
         element_id: String,
         parent_id: Option<String>,
     },
     /// Element was removed
+    #[serde(rename_all = "camelCase")]
     Removed { element_id: String },
     /// Element attributes changed
+    #[serde(rename_all = "camelCase")]
     Changed {
         element_id: String,
         attribute: String,
@@ -196,10 +201,249 @@ pub enum MutationEvent {
         new_value: Option<String>,
     },
     /// Text content changed
+    #[serde(rename_all = "camelCase")]
     TextChanged {
         element_id: String,
         text: String,
     },
+}
+
+/// Error type for perception operations
+#[derive(Debug, Clone)]
+pub struct PerceptionError(pub String);
+
+impl std::fmt::Display for PerceptionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for PerceptionError {}
+
+impl From<TivanaError> for PerceptionError {
+    fn from(e: TivanaError) -> Self {
+        PerceptionError(e.to_string())
+    }
+}
+
+/// Handle for controlling mutation observation
+pub struct MutationObserverHandle {
+    /// Shutdown signal sender
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+}
+
+impl MutationObserverHandle {
+    /// Stop the mutation observer
+    pub fn stop(self) {
+        let _ = self.shutdown_tx.send(());
+    }
+}
+
+/// Set up a DOM mutation observer using JavaScript MutationObserver
+///
+/// This installs a JavaScript MutationObserver on the page that captures
+/// DOM changes. A background task polls for mutations and sends them
+/// through the returned channel.
+pub async fn setup_mutation_observer(
+    page: &Arc<PageHandle>,
+) -> Result<(mpsc::Receiver<MutationEvent>, MutationObserverHandle), PerceptionError> {
+    debug!("Setting up mutation observer");
+
+    // Install the JavaScript MutationObserver
+    let install_script = r#"(() => {
+        // Store mutations in a global array
+        window.__tivana_mutations = window.__tivana_mutations || [];
+        window.__tivana_element_counter = window.__tivana_element_counter || 1;
+        
+        // Helper to get or create element ID
+        const getElementId = (el) => {
+            if (!el || el.nodeType !== 1) return null;
+            if (!el.dataset.tivanaId) {
+                el.dataset.tivanaId = 'e' + (window.__tivana_element_counter++);
+            }
+            return el.dataset.tivanaId;
+        };
+        
+        // Skip if observer already exists
+        if (window.__tivana_observer) {
+            return { status: 'already_running' };
+        }
+        
+        // Create the MutationObserver
+        window.__tivana_observer = new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+                const targetId = getElementId(mutation.target);
+                
+                if (mutation.type === 'childList') {
+                    // Handle added nodes
+                    for (const node of mutation.addedNodes) {
+                        if (node.nodeType === 1) { // Element node
+                            const id = getElementId(node);
+                            const parentId = getElementId(node.parentElement);
+                            window.__tivana_mutations.push({
+                                type: 'added',
+                                elementId: id,
+                                parentId: parentId
+                            });
+                        }
+                    }
+                    
+                    // Handle removed nodes
+                    for (const node of mutation.removedNodes) {
+                        if (node.nodeType === 1) {
+                            const id = node.dataset?.tivanaId || 'unknown';
+                            window.__tivana_mutations.push({
+                                type: 'removed',
+                                elementId: id
+                            });
+                        }
+                    }
+                } else if (mutation.type === 'attributes') {
+                    window.__tivana_mutations.push({
+                        type: 'changed',
+                        elementId: targetId,
+                        attribute: mutation.attributeName,
+                        oldValue: mutation.oldValue,
+                        newValue: mutation.target.getAttribute(mutation.attributeName)
+                    });
+                } else if (mutation.type === 'characterData') {
+                    const parentId = getElementId(mutation.target.parentElement);
+                    window.__tivana_mutations.push({
+                        type: 'textChanged',
+                        elementId: parentId || 'unknown',
+                        text: mutation.target.textContent
+                    });
+                }
+            }
+        });
+        
+        // Start observing
+        window.__tivana_observer.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeOldValue: true,
+            characterData: true,
+            characterDataOldValue: true
+        });
+        
+        return { status: 'started' };
+    })()"#;
+
+    let result: serde_json::Value = page
+        .evaluate(install_script)
+        .await
+        .map_err(|e| PerceptionError(format!("Failed to install mutation observer: {}", e)))?;
+
+    debug!(result = ?result, "Mutation observer installed");
+
+    // Create channel for sending mutations
+    let (tx, rx) = mpsc::channel::<MutationEvent>(256);
+
+    // Create shutdown channel
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Clone page for the polling task
+    let page_clone = Arc::clone(page);
+
+    // Spawn polling task
+    tokio::spawn(async move {
+        let poll_script = r#"(() => {
+            const mutations = window.__tivana_mutations || [];
+            window.__tivana_mutations = [];
+            return mutations;
+        })()"#;
+
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    // Poll for mutations
+                    match page_clone.evaluate::<Vec<serde_json::Value>>(poll_script).await {
+                        Ok(mutations) => {
+                            for mutation in mutations {
+                                if let Some(event) = parse_mutation_event(&mutation) {
+                                    if tx.send(event).await.is_err() {
+                                        // Receiver dropped, stop polling
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to poll mutations");
+                            // Continue polling despite errors
+                        }
+                    }
+                }
+                _ = &mut shutdown_rx => {
+                    // Cleanup the observer
+                    let cleanup_script = r#"(() => {
+                        if (window.__tivana_observer) {
+                            window.__tivana_observer.disconnect();
+                            delete window.__tivana_observer;
+                        }
+                        delete window.__tivana_mutations;
+                        return { status: 'stopped' };
+                    })()"#;
+                    
+                    let _ = page_clone.evaluate::<serde_json::Value>(cleanup_script).await;
+                    debug!("Mutation observer stopped");
+                    return;
+                }
+            }
+        }
+    });
+
+    let handle = MutationObserverHandle { shutdown_tx };
+    Ok((rx, handle))
+}
+
+/// Parse a mutation event from JavaScript JSON
+fn parse_mutation_event(value: &serde_json::Value) -> Option<MutationEvent> {
+    let event_type = value.get("type")?.as_str()?;
+
+    match event_type {
+        "added" => Some(MutationEvent::Added {
+            element_id: value.get("elementId")?.as_str()?.to_string(),
+            parent_id: value.get("parentId").and_then(|v| v.as_str()).map(String::from),
+        }),
+        "removed" => Some(MutationEvent::Removed {
+            element_id: value.get("elementId")?.as_str()?.to_string(),
+        }),
+        "changed" => Some(MutationEvent::Changed {
+            element_id: value.get("elementId")?.as_str()?.to_string(),
+            attribute: value.get("attribute")?.as_str()?.to_string(),
+            old_value: value.get("oldValue").and_then(|v| v.as_str()).map(String::from),
+            new_value: value.get("newValue").and_then(|v| v.as_str()).map(String::from),
+        }),
+        "textChanged" => Some(MutationEvent::TextChanged {
+            element_id: value.get("elementId")?.as_str()?.to_string(),
+            text: value.get("text")?.as_str()?.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// Stop mutation observation on a page
+pub async fn stop_mutation_observer(page: &Arc<PageHandle>) -> Result<(), PerceptionError> {
+    debug!("Stopping mutation observer");
+
+    let cleanup_script = r#"(() => {
+        if (window.__tivana_observer) {
+            window.__tivana_observer.disconnect();
+            delete window.__tivana_observer;
+        }
+        delete window.__tivana_mutations;
+        return { status: 'stopped' };
+    })()"#;
+
+    page.evaluate::<serde_json::Value>(cleanup_script)
+        .await
+        .map_err(|e| PerceptionError(format!("Failed to stop mutation observer: {}", e)))?;
+
+    Ok(())
 }
 
 /// Information about a found element
@@ -669,5 +913,154 @@ mod tests {
         let json = serde_json::to_string(&element).unwrap();
         assert!(json.contains("button"));
         assert!(json.contains("Submit"));
+    }
+
+    #[test]
+    fn test_mutation_event_added_serialization() {
+        let event = MutationEvent::Added {
+            element_id: "e5".to_string(),
+            parent_id: Some("e1".to_string()),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        // Note: rename_all = "camelCase" converts variant names to camelCase
+        assert!(json.contains("\"type\":\"added\""));
+        assert!(json.contains("\"elementId\":\"e5\""));
+        assert!(json.contains("\"parentId\":\"e1\""));
+    }
+
+    #[test]
+    fn test_mutation_event_removed_serialization() {
+        let event = MutationEvent::Removed {
+            element_id: "e3".to_string(),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"removed\""));
+        assert!(json.contains("\"elementId\":\"e3\""));
+    }
+
+    #[test]
+    fn test_mutation_event_changed_serialization() {
+        let event = MutationEvent::Changed {
+            element_id: "e2".to_string(),
+            attribute: "class".to_string(),
+            old_value: Some("btn".to_string()),
+            new_value: Some("btn active".to_string()),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"changed\""));
+        assert!(json.contains("\"attribute\":\"class\""));
+        assert!(json.contains("\"oldValue\":\"btn\""));
+        assert!(json.contains("\"newValue\":\"btn active\""));
+    }
+
+    #[test]
+    fn test_mutation_event_text_changed_serialization() {
+        let event = MutationEvent::TextChanged {
+            element_id: "e4".to_string(),
+            text: "Hello World".to_string(),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        // textChanged because of camelCase
+        assert!(json.contains("\"type\":\"textChanged\""));
+        assert!(json.contains("\"text\":\"Hello World\""));
+    }
+
+    #[test]
+    fn test_parse_mutation_event_added() {
+        let json = serde_json::json!({
+            "type": "added",
+            "elementId": "e10",
+            "parentId": "e1"
+        });
+
+        let event = parse_mutation_event(&json);
+        assert!(event.is_some());
+        match event.unwrap() {
+            MutationEvent::Added { element_id, parent_id } => {
+                assert_eq!(element_id, "e10");
+                assert_eq!(parent_id, Some("e1".to_string()));
+            }
+            _ => panic!("Expected Added event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mutation_event_removed() {
+        let json = serde_json::json!({
+            "type": "removed",
+            "elementId": "e5"
+        });
+
+        let event = parse_mutation_event(&json);
+        assert!(event.is_some());
+        match event.unwrap() {
+            MutationEvent::Removed { element_id } => {
+                assert_eq!(element_id, "e5");
+            }
+            _ => panic!("Expected Removed event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mutation_event_changed() {
+        let json = serde_json::json!({
+            "type": "changed",
+            "elementId": "e3",
+            "attribute": "disabled",
+            "oldValue": null,
+            "newValue": "true"
+        });
+
+        let event = parse_mutation_event(&json);
+        assert!(event.is_some());
+        match event.unwrap() {
+            MutationEvent::Changed { element_id, attribute, old_value, new_value } => {
+                assert_eq!(element_id, "e3");
+                assert_eq!(attribute, "disabled");
+                assert!(old_value.is_none());
+                assert_eq!(new_value, Some("true".to_string()));
+            }
+            _ => panic!("Expected Changed event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mutation_event_text_changed() {
+        let json = serde_json::json!({
+            "type": "textChanged",
+            "elementId": "e7",
+            "text": "Updated content"
+        });
+
+        let event = parse_mutation_event(&json);
+        assert!(event.is_some());
+        match event.unwrap() {
+            MutationEvent::TextChanged { element_id, text } => {
+                assert_eq!(element_id, "e7");
+                assert_eq!(text, "Updated content");
+            }
+            _ => panic!("Expected TextChanged event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mutation_event_invalid() {
+        let json = serde_json::json!({
+            "type": "invalid",
+            "elementId": "e1"
+        });
+
+        let event = parse_mutation_event(&json);
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_perception_error_display() {
+        let error = PerceptionError("Test error message".to_string());
+        assert_eq!(format!("{}", error), "Test error message");
     }
 }

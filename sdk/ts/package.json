@@ -20,6 +20,7 @@
     "dev": "bun --watch src/index.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "smoke-test": "bun run smoke-test.ts",
     "example": "bun run examples/smoke-test.ts"
   },
   "keywords": [
