@@ -1,0 +1,54 @@
+{
+  "name": "tivana",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Tivana - Streaming browser perception protocol for AI agents",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node && tsc --emitDeclarationOnly",
+    "dev": "bun --watch src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "example": "bun run examples/smoke-test.ts"
+  },
+  "keywords": [
+    "browser",
+    "automation",
+    "ai",
+    "agent",
+    "perception",
+    "cdp",
+    "chromium"
+  ],
+  "author": "Mostrom LLC",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Mostrom-LLC/tivana.git"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.0.0"
+  },
+  "optionalDependencies": {
+    "bufferutil": "^4.0.0",
+    "utf-8-validate": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

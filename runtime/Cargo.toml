@@ -1,0 +1,43 @@
+[package]
+name = "tivana"
+version = "0.1.0"
+edition = "2021"
+description = "Streaming browser perception protocol for AI agents"
+license = "MIT"
+repository = "https://github.com/Mostrom-LLC/tivana"
+
+[[bin]]
+name = "tivana"
+path = "src/main.rs"
+
+[dependencies]
+# Browser automation
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# WebSocket server
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
