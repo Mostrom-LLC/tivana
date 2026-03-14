@@ -102,7 +102,7 @@ impl ActionTarget {
 }
 
 /// Click options
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClickOptions {
     /// Button: "left", "right", "middle"
@@ -120,6 +120,17 @@ pub struct ClickOptions {
     /// Modifier keys to hold
     #[serde(default)]
     pub modifiers: Vec<String>,
+}
+
+impl Default for ClickOptions {
+    fn default() -> Self {
+        Self {
+            button: default_button(),
+            click_count: default_click_count(),
+            delay_ms: 0,
+            modifiers: Vec::new(),
+        }
+    }
 }
 
 fn default_button() -> String {
