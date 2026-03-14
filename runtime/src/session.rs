@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::browser::BrowserHandle;
+use crate::browser::{BrowserHandle, PageHandle};
 use crate::error::{ProtocolError, TivanaError};
 
 /// Session lifecycle states
@@ -31,7 +31,6 @@ pub enum SessionState {
 }
 
 /// A browser session
-#[derive(Debug)]
 pub struct Session {
     /// Unique session ID
     pub id: String,
@@ -47,6 +46,19 @@ pub struct Session {
 
     /// Session configuration
     pub config: SessionConfig,
+}
+
+// Manual Debug implementation since BrowserHandle contains non-Debug types
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("id", &self.id)
+            .field("state", &self.state)
+            .field("browser", &self.browser.is_some())
+            .field("created_at", &self.created_at)
+            .field("config", &self.config)
+            .finish()
+    }
 }
 
 /// Session configuration
@@ -120,6 +132,15 @@ impl Session {
             state: self.state,
             age_secs: self.created_at.elapsed().as_secs(),
         }
+    }
+
+    /// Get the default page from the browser
+    pub async fn default_page(&self) -> Result<Arc<PageHandle>, TivanaError> {
+        let browser = self
+            .browser
+            .as_ref()
+            .ok_or_else(|| TivanaError::Session("Session has no browser".to_string()))?;
+        browser.default_page().await
     }
 }
 
@@ -202,6 +223,23 @@ impl SessionRegistry {
         session.complete_launch(browser)?;
         info!(session_id = %id, "Session active");
         Ok(())
+    }
+
+    /// Get the default page for a session
+    pub async fn get_page(&self, id: &str) -> Result<Arc<PageHandle>, TivanaError> {
+        let sessions = self.sessions.read().await;
+        let session = sessions
+            .get(id)
+            .ok_or_else(|| TivanaError::Session(format!("Session not found: {}", id)))?;
+
+        if !session.is_active() {
+            return Err(TivanaError::Session(format!(
+                "Session {} is not active (state: {:?})",
+                id, session.state
+            )));
+        }
+
+        session.default_page().await
     }
 
     /// Execute a function with mutable access to a session

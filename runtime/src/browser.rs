@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::page::Page;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::error::TivanaError;
 
@@ -147,28 +148,88 @@ impl PageHandle {
         Ok(())
     }
 
-    /// Click at specific coordinates
+    /// Click at specific coordinates using JavaScript
     pub async fn click_at(&self, x: f64, y: f64) -> Result<(), TivanaError> {
-        self.page
-            .click(chromiumoxide::page::Point { x, y })
-            .await
-            .map_err(|e| TivanaError::Browser(format!("Click failed: {}", e)))
+        // Use JavaScript to dispatch click events at coordinates
+        let script = format!(
+            r#"(() => {{
+                const el = document.elementFromPoint({}, {});
+                if (el) {{
+                    const events = ['mousedown', 'mouseup', 'click'];
+                    for (const eventType of events) {{
+                        const event = new MouseEvent(eventType, {{
+                            view: window,
+                            bubbles: true,
+                            cancelable: true,
+                            clientX: {},
+                            clientY: {}
+                        }});
+                        el.dispatchEvent(event);
+                    }}
+                }}
+            }})()"#,
+            x, y, x, y
+        );
+        self.evaluate_void(&script).await
     }
 
-    /// Type text (sends key events)
+    /// Type text by directly manipulating the active element
     pub async fn type_text(&self, text: &str) -> Result<(), TivanaError> {
-        self.page
-            .type_str(text)
-            .await
-            .map_err(|e| TivanaError::Browser(format!("Type failed: {}", e)))
+        // Type by setting value or insertText depending on element type
+        let script = format!(
+            r#"(() => {{
+                const text = {};
+                const el = document.activeElement;
+                if (!el) return false;
+                
+                if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{
+                    // For form elements, set value and trigger events
+                    const start = el.selectionStart || 0;
+                    const end = el.selectionEnd || 0;
+                    const before = el.value.substring(0, start);
+                    const after = el.value.substring(end);
+                    el.value = before + text + after;
+                    el.selectionStart = el.selectionEnd = start + text.length;
+                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    return true;
+                }} else if (el.isContentEditable) {{
+                    // For contenteditable, use execCommand
+                    document.execCommand('insertText', false, text);
+                    return true;
+                }}
+                return false;
+            }})()"#,
+            serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
+        );
+        
+        let success: bool = self.evaluate(&script).await?;
+        if !success {
+            return Err(TivanaError::Browser("No active element to type into".to_string()));
+        }
+        Ok(())
     }
 
-    /// Press a key
+    /// Press a key using JavaScript keyboard events
     pub async fn press_key(&self, key: &str) -> Result<(), TivanaError> {
-        self.page
-            .press_key(key)
-            .await
-            .map_err(|e| TivanaError::Browser(format!("Press key failed: {}", e)))
+        // Dispatch keyboard event via JavaScript
+        let script = format!(
+            r#"(() => {{
+                const key = {};
+                const events = ['keydown', 'keypress', 'keyup'];
+                for (const eventType of events) {{
+                    const event = new KeyboardEvent(eventType, {{
+                        key: key,
+                        code: key,
+                        bubbles: true,
+                        cancelable: true
+                    }});
+                    document.activeElement?.dispatchEvent(event) || document.dispatchEvent(event);
+                }}
+            }})()"#,
+            serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string())
+        );
+        self.evaluate_void(&script).await
     }
 
     /// Close the page
@@ -176,7 +237,8 @@ impl PageHandle {
         self.page
             .close()
             .await
-            .map_err(|e| TivanaError::Browser(format!("Close page failed: {}", e)))
+            .map_err(|e| TivanaError::Browser(format!("Close page failed: {}", e)))?;
+        Ok(())
     }
 }
 
@@ -249,7 +311,7 @@ impl BrowserHandle {
     pub async fn close_page(&self, page_id: &str) -> Result<(), TivanaError> {
         let mut pages = self.pages.write().await;
         if let Some(pos) = pages.iter().position(|p| p.id == page_id) {
-            let page = pages.remove(pos);
+            let _page = pages.remove(pos);
             // Note: Can't call close() without owning the Arc
             // The page will be dropped when the Arc count reaches 0
             debug!(page_id = %page_id, "Page removed from tracking");
@@ -326,7 +388,9 @@ impl BrowserManager {
         // Build browser config
         let mut builder = BrowserConfig::builder();
 
-        if config.headless {
+        // NOTE: chromiumoxide's with_head() means "show the window" (headed mode)
+        // So we only call it when headless=false
+        if !config.headless {
             builder = builder.with_head();
         }
 

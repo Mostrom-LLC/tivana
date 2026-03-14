@@ -11,9 +11,11 @@ use tokio::sync::broadcast;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
-use crate::browser::{BrowserConfig, BrowserManager};
+use crate::act::{ActionTarget, Actor, ClickOptions, ScrollDirection, ScrollOptions, TypeOptions};
+use crate::browser::{BrowserLaunchConfig, BrowserManager};
 use crate::cli::Args;
 use crate::error::{ProtocolError, TivanaError};
+use crate::perceive::Perceiver;
 use crate::protocol::{
     parse_request, serialize_outbound, EventMessage, OutboundMessage, ResponseMessage,
     PROTOCOL_VERSION,
@@ -44,7 +46,7 @@ impl Server {
                 TivanaError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
             })?;
 
-        let browser_config = BrowserConfig {
+        let browser_config = BrowserLaunchConfig {
             headless: args.is_headless(),
             chrome_path: args.chrome_path.clone(),
             ..Default::default()
@@ -186,16 +188,23 @@ impl Server {
             "browser.navigate" => self.handle_browser_navigate(&request).await,
             "browser.url" => self.handle_browser_url(&request).await,
 
-            // Perception methods (stubs)
+            // Perception methods
+            "perceive.pageState" => self.handle_perceive_page_state(&request).await,
+            "perceive.elements" => self.handle_perceive_elements(&request).await,
             "perceive.accessibility" => self.handle_perceive_accessibility(&request).await,
             "perceive.text" => self.handle_perceive_text(&request).await,
             "perceive.metadata" => self.handle_perceive_metadata(&request).await,
 
-            // Action methods (stubs)
+            // Action methods
             "act.click" => self.handle_act_click(&request).await,
             "act.type" => self.handle_act_type(&request).await,
             "act.press" => self.handle_act_press(&request).await,
             "act.scroll" => self.handle_act_scroll(&request).await,
+            "act.navigate" => self.handle_browser_navigate(&request).await,
+            "act.hover" => self.handle_act_hover(&request).await,
+            "act.focus" => self.handle_act_focus(&request).await,
+            "act.select" => self.handle_act_select(&request).await,
+            "act.waitFor" => self.handle_act_wait_for(&request).await,
 
             // Unknown method
             _ => Err(ProtocolError::new(
@@ -208,6 +217,42 @@ impl Server {
             Ok(value) => ResponseMessage::success(id, value),
             Err(e) => ResponseMessage::error(id, e),
         }
+    }
+
+    // Helper to extract session ID from request
+    fn extract_session_id(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<String, ProtocolError> {
+        request
+            .session_id
+            .clone()
+            .or_else(|| {
+                request
+                    .params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .ok_or_else(|| ProtocolError::missing_field("sessionId"))
+    }
+
+    // Helper to parse action target from params
+    fn parse_action_target(params: &serde_json::Value) -> Option<ActionTarget> {
+        let target = params.get("target")?;
+
+        Some(ActionTarget {
+            element_id: target.get("elementId").and_then(|v| v.as_str()).map(String::from),
+            selector: target.get("selector").and_then(|v| v.as_str()).map(String::from),
+            text: target.get("text").and_then(|v| v.as_str()).map(String::from),
+            role: target.get("role").and_then(|v| v.as_str()).map(String::from),
+            label: target.get("label").and_then(|v| v.as_str()).map(String::from),
+            coordinates: target.get("coordinates").and_then(|v| {
+                let x = v.get("x").and_then(|x| x.as_f64())?;
+                let y = v.get("y").and_then(|y| y.as_f64())?;
+                Some((x, y))
+            }),
+        })
     }
 
     // Session handlers
@@ -239,7 +284,7 @@ impl Server {
                 .map(|v| v as u32),
         };
 
-        let session_id = self.sessions.create(config).await;
+        let session_id = self.sessions.create(config.clone()).await;
 
         // Start browser launch
         self.sessions
@@ -247,10 +292,18 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        // Launch browser (stub for now)
+        // Build browser launch config
+        let browser_config = BrowserLaunchConfig {
+            headless: config.headless,
+            viewport_width: config.viewport_width.unwrap_or(1280),
+            viewport_height: config.viewport_height.unwrap_or(720),
+            ..Default::default()
+        };
+
+        // Launch browser
         let browser = self
             .browser_manager
-            .launch(None)
+            .launch(Some(browser_config))
             .await
             .map_err(|e| ProtocolError::browser_launch_failed(e.to_string()))?;
 
@@ -259,6 +312,19 @@ impl Server {
             .complete_launch(&session_id, browser)
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        // Navigate to initial URL if specified
+        if let Some(url) = config.initial_url {
+            let page = self
+                .sessions
+                .get_page(&session_id)
+                .await
+                .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+            Actor::navigate(&page, &url)
+                .await
+                .map_err(|e| ProtocolError::new(crate::error::ErrorCode::NavigationFailed, e.to_string()))?;
+        }
 
         let info = self.sessions.get(&session_id).await.unwrap();
 
@@ -279,24 +345,6 @@ impl Server {
             "sessionId": info.id,
             "state": info.state
         }))
-    }
-
-    /// Helper to extract session ID from request
-    fn extract_session_id(
-        &self,
-        request: &crate::protocol::RequestMessage,
-    ) -> Result<String, ProtocolError> {
-        request
-            .session_id
-            .clone()
-            .or_else(|| {
-                request
-                    .params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            })
-            .ok_or_else(|| ProtocolError::missing_field("sessionId"))
     }
 
     async fn handle_session_list(&self) -> Result<serde_json::Value, ProtocolError> {
@@ -321,16 +369,13 @@ impl Server {
         Ok(serde_json::to_value(info).unwrap())
     }
 
-    // Browser handlers (stubs)
+    // Browser handlers
 
     async fn handle_browser_navigate(
         &self,
         request: &crate::protocol::RequestMessage,
     ) -> Result<serde_json::Value, ProtocolError> {
-        let _session_id = request
-            .session_id
-            .as_ref()
-            .ok_or_else(|| ProtocolError::missing_field("sessionId"))?;
+        let session_id = self.extract_session_id(request)?;
 
         let url = request
             .params
@@ -338,113 +383,173 @@ impl Server {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ProtocolError::missing_field("url"))?;
 
-        info!(url, "Navigate request (stub)");
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        Ok(serde_json::json!({
-            "url": url,
-            "title": "Stub Page",
-            "loadTimeMs": 0
-        }))
+        let result = Actor::navigate(&page, url)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::NavigationFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
     }
 
     async fn handle_browser_url(
         &self,
         request: &crate::protocol::RequestMessage,
     ) -> Result<serde_json::Value, ProtocolError> {
-        let _session_id = request
-            .session_id
-            .as_ref()
-            .ok_or_else(|| ProtocolError::missing_field("sessionId"))?;
+        let session_id = self.extract_session_id(request)?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let url = page.url().await.map_err(|e| ProtocolError::internal(e.to_string()))?;
 
         Ok(serde_json::json!({
-            "url": "about:blank"
+            "url": url
         }))
     }
 
-    // Perception handlers (stubs)
+    // Perception handlers
+
+    async fn handle_perceive_page_state(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let state = Perceiver::page_state(&page)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&state).unwrap_or_default())
+    }
+
+    async fn handle_perceive_elements(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let elements = Perceiver::elements(&page)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+
+        Ok(serde_json::json!({
+            "elements": elements,
+            "count": elements.len()
+        }))
+    }
 
     async fn handle_perceive_accessibility(
         &self,
         request: &crate::protocol::RequestMessage,
     ) -> Result<serde_json::Value, ProtocolError> {
-        let _session_id = request
-            .session_id
-            .as_ref()
-            .ok_or_else(|| ProtocolError::missing_field("sessionId"))?;
+        let session_id = self.extract_session_id(request)?;
 
-        Ok(serde_json::json!({
-            "root": {
-                "role": "document",
-                "name": "Stub Document",
-                "children": []
-            },
-            "timestampMs": 0
-        }))
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let snapshot = Perceiver::accessibility_snapshot(&page)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&snapshot).unwrap_or_default())
     }
 
     async fn handle_perceive_text(
         &self,
         request: &crate::protocol::RequestMessage,
     ) -> Result<serde_json::Value, ProtocolError> {
-        let _session_id = request
-            .session_id
-            .as_ref()
-            .ok_or_else(|| ProtocolError::missing_field("sessionId"))?;
+        let session_id = self.extract_session_id(request)?;
 
-        Ok(serde_json::json!({
-            "text": "",
-            "wordCount": 0,
-            "charCount": 0
-        }))
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let content = Perceiver::text_content(&page)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&content).unwrap_or_default())
     }
 
     async fn handle_perceive_metadata(
         &self,
         request: &crate::protocol::RequestMessage,
     ) -> Result<serde_json::Value, ProtocolError> {
-        let _session_id = request
-            .session_id
-            .as_ref()
-            .ok_or_else(|| ProtocolError::missing_field("sessionId"))?;
+        let session_id = self.extract_session_id(request)?;
 
-        Ok(serde_json::json!({
-            "url": "about:blank",
-            "title": null
-        }))
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let metadata = Perceiver::metadata(&page)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&metadata).unwrap_or_default())
     }
 
-    // Action handlers (stubs)
+    // Action handlers
 
     async fn handle_act_click(
         &self,
         request: &crate::protocol::RequestMessage,
     ) -> Result<serde_json::Value, ProtocolError> {
-        let _session_id = request
-            .session_id
-            .as_ref()
-            .ok_or_else(|| ProtocolError::missing_field("sessionId"))?;
+        let session_id = self.extract_session_id(request)?;
 
-        let target = request
-            .params
-            .get("target")
+        let target = Self::parse_action_target(&request.params)
             .ok_or_else(|| ProtocolError::missing_field("target"))?;
 
-        info!(?target, "Click action (stub)");
+        let options: ClickOptions = request
+            .params
+            .get("options")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
 
-        Ok(serde_json::json!({
-            "success": true,
-            "durationMs": 0
-        }))
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::click(&page, &target, &options)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
     }
 
     async fn handle_act_type(
         &self,
         request: &crate::protocol::RequestMessage,
     ) -> Result<serde_json::Value, ProtocolError> {
-        let _session_id = request
-            .session_id
-            .as_ref()
-            .ok_or_else(|| ProtocolError::missing_field("sessionId"))?;
+        let session_id = self.extract_session_id(request)?;
 
         let text = request
             .params
@@ -452,22 +557,32 @@ impl Server {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ProtocolError::missing_field("text"))?;
 
-        info!(text_len = text.len(), "Type action (stub)");
+        let target = Self::parse_action_target(&request.params);
 
-        Ok(serde_json::json!({
-            "success": true,
-            "durationMs": 0
-        }))
+        let options: TypeOptions = request
+            .params
+            .get("options")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::type_text(&page, text, target.as_ref(), &options)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
     }
 
     async fn handle_act_press(
         &self,
         request: &crate::protocol::RequestMessage,
     ) -> Result<serde_json::Value, ProtocolError> {
-        let _session_id = request
-            .session_id
-            .as_ref()
-            .ok_or_else(|| ProtocolError::missing_field("sessionId"))?;
+        let session_id = self.extract_session_id(request)?;
 
         let key = request
             .params
@@ -475,29 +590,172 @@ impl Server {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ProtocolError::missing_field("key"))?;
 
-        info!(key, "Press action (stub)");
+        let modifiers: Vec<String> = request
+            .params
+            .get("modifiers")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
 
-        Ok(serde_json::json!({
-            "success": true,
-            "durationMs": 0
-        }))
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::press(&page, key, &modifiers)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
     }
 
     async fn handle_act_scroll(
         &self,
         request: &crate::protocol::RequestMessage,
     ) -> Result<serde_json::Value, ProtocolError> {
-        let _session_id = request
-            .session_id
-            .as_ref()
-            .ok_or_else(|| ProtocolError::missing_field("sessionId"))?;
+        let session_id = self.extract_session_id(request)?;
 
-        info!("Scroll action (stub)");
+        let target = Self::parse_action_target(&request.params);
 
-        Ok(serde_json::json!({
-            "success": true,
-            "durationMs": 0
-        }))
+        let direction: ScrollDirection = request
+            .params
+            .get("direction")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or(ScrollDirection::Down);
+
+        let amount: i32 = request
+            .params
+            .get("amount")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32)
+            .unwrap_or(100);
+
+        let smooth: bool = request
+            .params
+            .get("smooth")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let options = ScrollOptions {
+            direction,
+            amount,
+            smooth,
+        };
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::scroll(&page, target.as_ref(), &options)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    async fn handle_act_hover(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let target = Self::parse_action_target(&request.params)
+            .ok_or_else(|| ProtocolError::missing_field("target"))?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::hover(&page, &target)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    async fn handle_act_focus(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let target = Self::parse_action_target(&request.params)
+            .ok_or_else(|| ProtocolError::missing_field("target"))?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::focus(&page, &target)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    async fn handle_act_select(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let target = Self::parse_action_target(&request.params)
+            .ok_or_else(|| ProtocolError::missing_field("target"))?;
+
+        let value = request
+            .params
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("value"))?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::select(&page, &target, value)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    async fn handle_act_wait_for(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let condition: crate::act::WaitCondition = request
+            .params
+            .get("condition")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .ok_or_else(|| ProtocolError::missing_field("condition"))?;
+
+        let timeout_ms: u64 = request
+            .params
+            .get("timeoutMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30000);
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::wait_for(&page, &condition, timeout_ms)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionTimeout, e.to_string()))?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
     }
 }
 
