@@ -3,14 +3,15 @@
 ## 0. Freeze v1 scope
 - [ ] Confirm v1 is **Chromium-only**
 - [ ] Confirm v1 scope is only:
-  - [ ] **Perceive**
-  - [ ] **Act**
+  - [ ] **Perceive** (streaming page state)
+  - [ ] **Act** (click, type, scroll, navigate)
 - [ ] Explicitly exclude for v1:
   - [ ] memory
   - [ ] planning
   - [ ] domain logic
   - [ ] non-Chromium browsers
   - [ ] npm publishing
+  - [ ] **screenshots** (not even as fallback — streaming perception replaces them entirely)
 
 ---
 
@@ -65,11 +66,12 @@
   - [ ] `event`
   - [ ] `error`
 - [ ] Define protocol version field
-- [ ] Define capability negotiation field
 - [ ] Define standard error shape:
   - [ ] `code`
   - [ ] `message`
   - [ ] `data`
+
+> **Note:** Capability negotiation deferred to v2. Keep v1 simple.
 
 ---
 
@@ -110,59 +112,74 @@
 ---
 
 ## 6. Perceive primitives
+
+> **⚠️ NO SCREENSHOTS.** Not as primary, not as fallback. Streaming semantic perception is the entire point. If we hit a wall that "needs" screenshots, we solve it with better perception — not by falling back to pixels.
+
 ### Minimum v1 perception
 - [ ] `perceive.pageState`
-- [ ] Return:
   - [ ] current URL
   - [ ] page title
-  - [ ] page HTML or normalized DOM snapshot
-  - [ ] focused element if available
-- [ ] `perceive.screenshot`
-- [ ] `perceive.accessibilityTree` or equivalent structured element view
-- [ ] `perceive.mutations` event stream or periodic state refresh event
+  - [ ] focused element ID
+  - [ ] scroll position
+  - [ ] viewport dimensions
+  - [ ] timestamp
+- [ ] `perceive.elements` — returns element tree with:
+  - [ ] AXTree data (role, label, value, focused, enabled)
+  - [ ] Computed styles (font, colors, borders, padding, margin)
+  - [ ] Geometry (bounds via getBoundingClientRect)
+- [ ] `perceive.mutations` — **event stream** (not polling)
+  - [ ] element added
+  - [ ] element removed
+  - [ ] element changed (with changed properties)
+  - [ ] focus changed
+  - [ ] navigation occurred
 
 ### Output discipline
-- [ ] Keep page-state payload normalized
-- [ ] Keep element representation stable enough for follow-up actions
-- [ ] Document what “mutation” means in v1
+- [ ] Keep page-state payload normalized and compact
+- [ ] Element IDs must be stable enough for follow-up actions
+- [ ] Document mutation event semantics
 
 ---
 
 ## 7. Act primitives
 ### Minimum v1 actions
-- [ ] `act.navigate`
-- [ ] `act.click`
-- [ ] `act.type`
-- [ ] `act.scroll`
+- [ ] `act.navigate` — go to URL
+- [ ] `act.click` — click element by ID or selector
+- [ ] `act.type` — type text into focused element or target
+- [ ] `act.scroll` — scroll element into view
 
 ### Action requirements
-- [ ] Accept target descriptor for actions
+- [ ] Accept element ID as primary target
+- [ ] Accept role+label selector as fallback target
 - [ ] Return success/failure in structured form
-- [ ] Verify action effect where possible
+- [ ] Return new page state after action completes
 - [ ] Fail clearly when target is missing/ambiguous
 
 ---
 
 ## 8. Element targeting model
-- [ ] Define how elements are identified in v1
-- [ ] Support at least one stable targeting approach:
-  - [ ] accessibility/text-based selector
-  - [ ] DOM path / node id
-  - [ ] bounding box fallback if needed
-- [ ] Document target ambiguity behavior
-- [ ] Document stale target behavior after DOM changes
+- [ ] Primary: element ID from AXTree (e.g., `e1`, `e2`)
+- [ ] Secondary: role + label selector (e.g., `{ role: "button", label: "Submit" }`)
+- [ ] Define ID stability rules:
+  - [ ] IDs are stable within a page session
+  - [ ] IDs may change after navigation or major DOM mutation
+- [ ] Define stale target behavior:
+  - [ ] If element ID no longer exists, return `target_not_found` error
+  - [ ] Agent must re-perceive to get fresh IDs
+- [ ] Define ambiguous target behavior:
+  - [ ] If multiple elements match selector, return `target_ambiguous` error with count
 
 ---
 
 ## 9. Error handling + recovery
 - [ ] Separate error classes:
-  - [ ] protocol validation error
-  - [ ] session error
-  - [ ] browser error
-  - [ ] action failure
-  - [ ] perception failure
-- [ ] Add disconnect handling
-- [ ] Add browser crash handling
+  - [ ] `protocol_error` — malformed message, missing fields
+  - [ ] `session_error` — invalid session, session closed
+  - [ ] `browser_error` — launch failed, crashed, disconnected
+  - [ ] `action_error` — target not found, action failed
+  - [ ] `perception_error` — failed to read page state
+- [ ] Add disconnect handling (client disconnects mid-action)
+- [ ] Add browser crash handling (restart session or error out)
 - [ ] Add stale page/session handling
 - [ ] Ensure runtime never silently hangs on failed browser action
 
@@ -171,12 +188,12 @@
 ## 10. CLI
 - [ ] Implement `tivana` CLI with `clap`
 - [ ] Support:
-  - [ ] start server
-  - [ ] port selection
-  - [ ] headless/headed mode
-  - [ ] chromium executable override if needed
-- [ ] Add helpful startup logs
-- [ ] Add graceful shutdown behavior
+  - [ ] `tivana start` — start server
+  - [ ] `--port <port>` — port selection (default: 9876)
+  - [ ] `--headless` / `--headed` — browser visibility
+  - [ ] `--chrome-path <path>` — chromium executable override
+- [ ] Add helpful startup logs (port, mode, version)
+- [ ] Add graceful shutdown on SIGINT/SIGTERM
 
 ---
 
@@ -185,108 +202,134 @@
 - [ ] Bun WebSocket primary path
 - [ ] Node `ws` fallback path
 - [ ] Implement:
-  - [ ] `connect()`
-  - [ ] `handshake()`
-  - [ ] `createSession()`
-  - [ ] `navigate()`
-  - [ ] `pageState()`
-  - [ ] `click()`
-  - [ ] `type()`
-  - [ ] `scroll()`
-  - [ ] `closeSession()`
+  - [ ] `connect(url)` — connect to runtime
+  - [ ] `createSession()` — create browser session
+  - [ ] `navigate(url)` — navigate to URL
+  - [ ] `pageState()` — get current page state
+  - [ ] `elements()` — get element tree
+  - [ ] `click(target)` — click element
+  - [ ] `type(text, target?)` — type text
+  - [ ] `scroll(target)` — scroll to element
+  - [ ] `onMutation(callback)` — subscribe to mutations
+  - [ ] `closeSession()` — close session
+  - [ ] `disconnect()` — disconnect from runtime
 - [ ] Add typed request/response interfaces
-- [ ] Add event subscription support
 - [ ] Add example script using the SDK end-to-end
 
 ---
 
 ## 12. Local verification
 ### Runtime verification
-- [ ] Start runtime locally
+- [ ] Start runtime locally (`tivana start`)
 - [ ] Connect with TS SDK
 - [ ] Create session
-- [ ] Launch Chromium
+- [ ] Chromium launches (visible in headed mode)
 - [ ] Navigate to a page
 - [ ] Read page state
+- [ ] Read element tree with styles
 - [ ] Click an element
 - [ ] Type into an input
-- [ ] Scroll
+- [ ] Scroll to element
+- [ ] Receive mutation events
 - [ ] Close session
+- [ ] Chromium closes
 - [ ] Shut down runtime cleanly
 
 ### Reliability verification
-- [ ] Verify bad request returns structured error
-- [ ] Verify browser launch failure returns structured error
-- [ ] Verify session close actually tears down resources
-- [ ] Verify client disconnect does not crash runtime
+- [ ] Bad request returns structured error
+- [ ] Browser launch failure returns structured error
+- [ ] Session close tears down resources
+- [ ] Client disconnect does not crash runtime
+- [ ] Stale element ID returns clear error
 
 ---
 
 ## 13. Test suite
 ### Rust
-- [ ] protocol serialization/deserialization tests
-- [ ] session lifecycle tests
-- [ ] action routing tests
-- [ ] error mapping tests
+- [ ] Protocol serialization/deserialization tests
+- [ ] Session lifecycle tests
+- [ ] Action routing tests
+- [ ] Error mapping tests
 
 ### SDK
-- [ ] client connect/disconnect tests
-- [ ] request correlation tests
-- [ ] fallback transport tests
+- [ ] Client connect/disconnect tests
+- [ ] Request correlation tests
+- [ ] Bun WebSocket tests
+- [ ] Node `ws` fallback tests
 
 ### End-to-end
-- [ ] one smoke test:
+- [ ] Smoke test:
   - [ ] connect
   - [ ] create session
   - [ ] launch Chromium
   - [ ] navigate
-  - [ ] perceive
-  - [ ] act
-  - [ ] close
+  - [ ] perceive page state
+  - [ ] perceive elements
+  - [ ] click
+  - [ ] type
+  - [ ] scroll
+  - [ ] close session
+  - [ ] disconnect
 
 ---
 
 ## 14. Docs to finish before calling v1 usable
-- [ ] protocol envelope reference
-- [ ] supported v1 methods
-- [ ] session lifecycle doc
+- [ ] Protocol envelope reference (message shapes)
+- [ ] Supported v1 methods (perceive.*, act.*)
+- [ ] Session lifecycle doc
+- [ ] Element model doc (AXTree + styles + geometry)
+- [ ] Element targeting doc (IDs, selectors, staleness)
 - [ ] Chromium-only scope doc
-- [ ] local run instructions
+- [ ] Local run instructions
 - [ ] TS SDK usage example
-- [ ] known limitations
+- [ ] Known limitations
 
 ---
 
 # Recommended build order
-If you want the shortest critical path:
 
-## Phase 1
-- [ ] Rust runtime skeleton
-- [ ] WebSocket server
-- [ ] protocol envelope
-- [ ] session registry
+## Phase 1 — Foundation
+- [ ] Rust runtime skeleton (`cargo new`)
+- [ ] Dependencies in `Cargo.toml`
+- [ ] Module structure
+- [ ] Protocol envelope types
+- [ ] WebSocket server (accept connections, parse JSON)
+- [ ] Session registry (create, get, close)
 
-## Phase 2
-- [ ] Chromium launch/navigate/close
+## Phase 2 — Browser + Perceive + Act
+- [ ] Chromium launch/navigate/close via chromiumoxide
 - [ ] `perceive.pageState`
+- [ ] `perceive.elements` (AXTree + styles + geometry)
+- [ ] `perceive.mutations` event stream
+- [ ] `act.navigate`
 - [ ] `act.click`
 - [ ] `act.type`
 - [ ] `act.scroll`
 
-## Phase 3
-- [ ] TypeScript SDK
-- [ ] local smoke test
-- [ ] basic docs
-- [ ] hardening/errors
+## Phase 3 — SDK + Polish
+- [ ] TypeScript SDK (Bun primary, Node fallback)
+- [ ] Local smoke test script
+- [ ] Error handling hardening
+- [ ] Basic docs
+- [ ] README update with usage
 
-## Definition of done for v1
-Tivana v1 is “done” when:
-- [ ] a TS client can connect to the Rust runtime
-- [ ] create a session
-- [ ] launch Chromium
-- [ ] navigate to a page
-- [ ] perceive page state
-- [ ] click/type/scroll successfully
-- [ ] receive structured responses/errors
-- [ ] close everything cleanly
-- [ ] all of that works locally without manual intervention
+---
+
+# Definition of done for v1
+
+Tivana v1 is "done" when:
+
+- [ ] A TS client can connect to the Rust runtime
+- [ ] Create a session (Chromium launches)
+- [ ] Navigate to any page
+- [ ] Perceive page state (URL, title, scroll, viewport)
+- [ ] Perceive element tree (roles, labels, styles, geometry)
+- [ ] Receive mutation events when DOM changes
+- [ ] Click an element by ID
+- [ ] Type text into an input
+- [ ] Scroll to an element
+- [ ] Receive structured errors for failures
+- [ ] Close session (Chromium closes)
+- [ ] Disconnect cleanly
+- [ ] All of that works locally without manual intervention
+- [ ] **No screenshots anywhere in the codebase**
