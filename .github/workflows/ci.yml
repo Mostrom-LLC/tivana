@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            runtime/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build runtime
+        working-directory: runtime
+        run: cargo build --verbose
+
+      - name: Run unit tests
+        working-directory: runtime
+        run: cargo test --verbose
+
+      - name: Check formatting
+        working-directory: runtime
+        run: cargo fmt --check
+
+      - name: Clippy lint
+        working-directory: runtime
+        run: cargo clippy -- -D warnings
+
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install SDK dependencies
+        working-directory: sdk/ts
+        run: bun install
+
+      - name: Type check SDK
+        working-directory: sdk/ts
+        run: bun run tsc --noEmit
