@@ -1,18 +1,22 @@
 //! Chromium browser management
 //!
-//! This module handles launching and controlling Chromium instances.
-//! Currently a stub for Phase 1 - will be fully implemented in Phase 2.
+//! This module handles launching and controlling Chromium instances
+//! using the chromiumoxide library for CDP communication.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::page::Page;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tokio::sync::RwLock;
+use tracing::{debug, info, warn};
 
 use crate::error::TivanaError;
 
 /// Browser launch configuration
 #[derive(Debug, Clone)]
-pub struct BrowserConfig {
+pub struct BrowserLaunchConfig {
     /// Run in headless mode
     pub headless: bool,
 
@@ -27,9 +31,12 @@ pub struct BrowserConfig {
 
     /// User data directory
     pub user_data_dir: Option<PathBuf>,
+
+    /// Additional Chrome arguments
+    pub args: Vec<String>,
 }
 
-impl Default for BrowserConfig {
+impl Default for BrowserLaunchConfig {
     fn default() -> Self {
         Self {
             headless: true,
@@ -37,7 +44,139 @@ impl Default for BrowserConfig {
             viewport_width: 1280,
             viewport_height: 720,
             user_data_dir: None,
+            args: vec![],
         }
+    }
+}
+
+/// Wrapper around chromiumoxide Page with additional state
+#[derive(Debug)]
+pub struct PageHandle {
+    /// The underlying chromiumoxide page
+    page: Page,
+
+    /// Page ID for tracking
+    pub id: String,
+}
+
+impl PageHandle {
+    /// Create a new page handle
+    pub fn new(page: Page) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        Self { page, id }
+    }
+
+    /// Get the underlying page reference
+    pub fn inner(&self) -> &Page {
+        &self.page
+    }
+
+    /// Get the current URL
+    pub async fn url(&self) -> Result<String, TivanaError> {
+        // Use evaluate to get the current URL reliably
+        let url: String = self
+            .page
+            .evaluate("window.location.href")
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to get URL: {}", e)))?
+            .into_value()
+            .map_err(|e| TivanaError::Browser(format!("Failed to parse URL: {:?}", e)))?;
+        Ok(url)
+    }
+
+    /// Get the page title
+    pub async fn title(&self) -> Result<Option<String>, TivanaError> {
+        let title: String = self
+            .page
+            .evaluate("document.title")
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to get title: {}", e)))?
+            .into_value()
+            .map_err(|e| TivanaError::Browser(format!("Failed to parse title: {:?}", e)))?;
+        Ok(if title.is_empty() { None } else { Some(title) })
+    }
+
+    /// Navigate to a URL
+    pub async fn navigate(&self, url: &str) -> Result<NavigationResult, TivanaError> {
+        let start = std::time::Instant::now();
+
+        self.page
+            .goto(url)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Navigation failed: {}", e)))?;
+
+        // Wait for page to be ready
+        self.page
+            .wait_for_navigation()
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Wait for navigation failed: {}", e)))?;
+
+        let load_time_ms = start.elapsed().as_millis() as u64;
+        let final_url = self.url().await?;
+        let title = self.title().await?;
+
+        Ok(NavigationResult {
+            url: final_url,
+            title,
+            load_time_ms,
+        })
+    }
+
+    /// Execute JavaScript and return result
+    pub async fn evaluate<T>(&self, script: &str) -> Result<T, TivanaError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let result = self
+            .page
+            .evaluate(script)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Evaluate failed: {}", e)))?;
+
+        result
+            .into_value()
+            .map_err(|e| TivanaError::Browser(format!("Failed to parse result: {:?}", e)))
+    }
+
+    /// Execute JavaScript without expecting a return value
+    pub async fn evaluate_void(&self, script: &str) -> Result<(), TivanaError> {
+        self.page
+            .evaluate(script)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Evaluate failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Click at specific coordinates
+    pub async fn click_at(&self, x: f64, y: f64) -> Result<(), TivanaError> {
+        self.page
+            .click(chromiumoxide::page::Point { x, y })
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Click failed: {}", e)))
+    }
+
+    /// Type text (sends key events)
+    pub async fn type_text(&self, text: &str) -> Result<(), TivanaError> {
+        self.page
+            .type_str(text)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Type failed: {}", e)))
+    }
+
+    /// Press a key
+    pub async fn press_key(&self, key: &str) -> Result<(), TivanaError> {
+        self.page
+            .press_key(key)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Press key failed: {}", e)))
+    }
+
+    /// Close the page
+    pub async fn close(self) -> Result<(), TivanaError> {
+        self.page
+            .close()
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Close page failed: {}", e)))
     }
 }
 
@@ -45,56 +184,98 @@ impl Default for BrowserConfig {
 #[derive(Debug)]
 pub struct BrowserHandle {
     /// Configuration used to launch
-    pub config: BrowserConfig,
+    pub config: BrowserLaunchConfig,
 
-    /// Browser process ID (when available)
-    pub pid: Option<u32>,
+    /// The chromiumoxide browser instance
+    browser: Arc<RwLock<Option<Browser>>>,
 
-    // TODO: Add chromiumoxide Browser and Page handles in Phase 2
-    // browser: chromiumoxide::Browser,
-    // page: chromiumoxide::Page,
+    /// Pages in this browser
+    pages: Arc<RwLock<Vec<Arc<PageHandle>>>>,
+
+    /// Browser handler task
+    handler_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl BrowserHandle {
-    /// Create a new browser handle (stub for Phase 1)
-    pub fn new_stub(config: BrowserConfig) -> Self {
-        Self { config, pid: None }
+    /// Create a new browser handle from a launched browser
+    pub fn new(
+        config: BrowserLaunchConfig,
+        browser: Browser,
+        handler: tokio::task::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            config,
+            browser: Arc::new(RwLock::new(Some(browser))),
+            pages: Arc::new(RwLock::new(Vec::new())),
+            handler_task: Some(handler),
+        }
     }
 
-    /// Navigate to a URL
-    pub async fn navigate(&self, url: &str) -> Result<NavigationResult, TivanaError> {
-        info!(url = %url, "Navigate (stub)");
-        // TODO: Implement actual navigation in Phase 2
-        Ok(NavigationResult {
-            url: url.to_string(),
-            title: Some("Stub Page".to_string()),
-            load_time_ms: 0,
-        })
+    /// Create a new page in this browser
+    pub async fn new_page(&self) -> Result<Arc<PageHandle>, TivanaError> {
+        let browser_guard = self.browser.read().await;
+        let browser = browser_guard
+            .as_ref()
+            .ok_or_else(|| TivanaError::Browser("Browser is closed".to_string()))?;
+
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to create page: {}", e)))?;
+
+        let handle = Arc::new(PageHandle::new(page));
+        self.pages.write().await.push(Arc::clone(&handle));
+
+        info!(page_id = %handle.id, "Created new page");
+        Ok(handle)
     }
 
-    /// Get current page URL
-    pub async fn current_url(&self) -> Result<String, TivanaError> {
-        // TODO: Implement in Phase 2
-        Ok("about:blank".to_string())
+    /// Get the first/default page
+    pub async fn default_page(&self) -> Result<Arc<PageHandle>, TivanaError> {
+        let pages = self.pages.read().await;
+        pages
+            .first()
+            .cloned()
+            .ok_or_else(|| TivanaError::Browser("No pages available".to_string()))
     }
 
-    /// Get current page title
-    pub async fn title(&self) -> Result<Option<String>, TivanaError> {
-        // TODO: Implement in Phase 2
-        Ok(None)
+    /// Get a page by ID
+    pub async fn get_page(&self, id: &str) -> Option<Arc<PageHandle>> {
+        let pages = self.pages.read().await;
+        pages.iter().find(|p| p.id == id).cloned()
     }
 
-    /// Execute JavaScript
-    pub async fn evaluate(&self, script: &str) -> Result<serde_json::Value, TivanaError> {
-        debug!(script_len = script.len(), "Evaluate (stub)");
-        // TODO: Implement in Phase 2
-        Ok(serde_json::Value::Null)
+    /// Close a specific page
+    pub async fn close_page(&self, page_id: &str) -> Result<(), TivanaError> {
+        let mut pages = self.pages.write().await;
+        if let Some(pos) = pages.iter().position(|p| p.id == page_id) {
+            let page = pages.remove(pos);
+            // Note: Can't call close() without owning the Arc
+            // The page will be dropped when the Arc count reaches 0
+            debug!(page_id = %page_id, "Page removed from tracking");
+        }
+        Ok(())
     }
 
-    /// Close the browser
+    /// Close the browser and all pages
     pub async fn close(self) -> Result<(), TivanaError> {
-        info!("Browser close (stub)");
-        // TODO: Implement actual browser close in Phase 2
+        info!("Closing browser");
+
+        // Clear pages
+        self.pages.write().await.clear();
+
+        // Take ownership of browser and close it
+        let mut browser_guard = self.browser.write().await;
+        if let Some(browser) = browser_guard.take() {
+            // Browser will be dropped, which closes the connection
+            drop(browser);
+        }
+
+        // Abort handler task if still running
+        if let Some(handler) = self.handler_task {
+            handler.abort();
+        }
+
         Ok(())
     }
 }
@@ -117,36 +298,94 @@ pub struct NavigationResult {
 #[derive(Debug, Clone)]
 pub struct BrowserManager {
     /// Default configuration for new browsers
-    default_config: BrowserConfig,
+    default_config: BrowserLaunchConfig,
 }
 
 impl BrowserManager {
     /// Create a new browser manager
-    pub fn new(config: BrowserConfig) -> Self {
+    pub fn new(config: BrowserLaunchConfig) -> Self {
         Self {
             default_config: config,
         }
     }
 
     /// Launch a new browser instance
-    pub async fn launch(&self, config: Option<BrowserConfig>) -> Result<BrowserHandle, TivanaError> {
+    pub async fn launch(
+        &self,
+        config: Option<BrowserLaunchConfig>,
+    ) -> Result<BrowserHandle, TivanaError> {
         let config = config.unwrap_or_else(|| self.default_config.clone());
 
         info!(
             headless = config.headless,
             chrome_path = ?config.chrome_path,
-            "Launching browser (stub)"
+            viewport = format!("{}x{}", config.viewport_width, config.viewport_height),
+            "Launching browser"
         );
 
-        // TODO: Actually launch chromium in Phase 2
-        // For now, return a stub handle
-        Ok(BrowserHandle::new_stub(config))
+        // Build browser config
+        let mut builder = BrowserConfig::builder();
+
+        if config.headless {
+            builder = builder.with_head();
+        }
+
+        // Set viewport
+        builder = builder.window_size(config.viewport_width, config.viewport_height);
+
+        // Set chrome path if specified
+        if let Some(ref path) = config.chrome_path {
+            builder = builder.chrome_executable(path);
+        }
+
+        // Set user data dir if specified
+        if let Some(ref dir) = config.user_data_dir {
+            builder = builder.user_data_dir(dir);
+        }
+
+        // Add common args for stability
+        builder = builder
+            .arg("--no-first-run")
+            .arg("--no-default-browser-check")
+            .arg("--disable-background-networking")
+            .arg("--disable-extensions")
+            .arg("--disable-sync")
+            .arg("--disable-translate");
+
+        // Add custom args
+        for arg in &config.args {
+            builder = builder.arg(arg);
+        }
+
+        let browser_config = builder
+            .build()
+            .map_err(|e| TivanaError::Browser(format!("Failed to build browser config: {}", e)))?;
+
+        // Launch browser
+        let (browser, mut handler) = Browser::launch(browser_config)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to launch browser: {}", e)))?;
+
+        // Spawn handler task
+        let handler_task = tokio::spawn(async move {
+            while let Some(event) = handler.next().await {
+                debug!(?event, "Browser event");
+            }
+        });
+
+        let handle = BrowserHandle::new(config, browser, handler_task);
+
+        // Create initial page
+        handle.new_page().await?;
+
+        info!("Browser launched successfully");
+        Ok(handle)
     }
 }
 
 impl Default for BrowserManager {
     fn default() -> Self {
-        Self::new(BrowserConfig::default())
+        Self::new(BrowserLaunchConfig::default())
     }
 }
 
@@ -172,16 +411,9 @@ mod tests {
 
     #[test]
     fn test_browser_config_default() {
-        let config = BrowserConfig::default();
+        let config = BrowserLaunchConfig::default();
         assert!(config.headless);
         assert_eq!(config.viewport_width, 1280);
         assert_eq!(config.viewport_height, 720);
-    }
-
-    #[tokio::test]
-    async fn test_browser_manager_launch_stub() {
-        let manager = BrowserManager::default();
-        let handle = manager.launch(None).await.unwrap();
-        assert!(handle.config.headless);
     }
 }

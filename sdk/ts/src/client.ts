@@ -65,7 +65,8 @@ export class TivanaClient {
     const wsUrl = url || this.options.url;
 
     // Use Bun WebSocket if available, otherwise fall back to Node ws
-    if (typeof Bun !== "undefined") {
+    // @ts-ignore - Bun is a global in Bun runtime
+    if (typeof globalThis.Bun !== "undefined") {
       await this.connectBun(wsUrl);
     } else {
       await this.connectNode(wsUrl);
