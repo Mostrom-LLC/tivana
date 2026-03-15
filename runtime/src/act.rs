@@ -286,10 +286,7 @@ impl Actor {
             if let Some(bounds) = Perceiver::resolve_element_bounds(page, id).await? {
                 return Ok(bounds);
             }
-            return Err(TivanaError::Browser(format!(
-                "Element not found: {}",
-                id
-            )));
+            return Err(TivanaError::Browser(format!("Element not found: {}", id)));
         }
 
         if let Some(ref selector) = target.selector {
@@ -407,7 +404,8 @@ impl Actor {
 
         // Clear existing content if requested
         if options.clear_first {
-            page.evaluate_void("document.activeElement?.select?.()").await?;
+            page.evaluate_void("document.activeElement?.select?.()")
+                .await?;
         }
 
         // Type the text
@@ -615,9 +613,7 @@ impl Actor {
                 )));
             }
         } else {
-            return Err(TivanaError::Browser(
-                "Select requires selector".to_string(),
-            ));
+            return Err(TivanaError::Browser("Select requires selector".to_string()));
         }
 
         let duration = start.elapsed().as_millis() as u64;
@@ -638,8 +634,7 @@ impl Actor {
         let start = std::time::Instant::now();
         debug!(?condition, timeout_ms, "Waiting");
 
-        let deadline = tokio::time::Instant::now()
-            + tokio::time::Duration::from_millis(timeout_ms);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
         match condition {
             WaitCondition::Element { selector } => {
@@ -670,9 +665,9 @@ impl Actor {
                         if (!el) return false;
                         const style = window.getComputedStyle(el);
                         const rect = el.getBoundingClientRect();
-                        return style.display !== 'none' && 
-                               style.visibility !== 'hidden' && 
-                               rect.width > 0 && 
+                        return style.display !== 'none' &&
+                               style.visibility !== 'hidden' &&
+                               rect.width > 0 &&
                                rect.height > 0;
                     }})()"#,
                     serde_json::to_string(selector).unwrap_or_default()
@@ -722,9 +717,7 @@ impl Actor {
             WaitCondition::Navigation => {
                 // Wait for document ready state
                 loop {
-                    let ready: String = page
-                        .evaluate("document.readyState")
-                        .await?;
+                    let ready: String = page.evaluate("document.readyState").await?;
                     if ready == "complete" {
                         break;
                     }
@@ -740,9 +733,7 @@ impl Actor {
             WaitCondition::NetworkIdle { idle_time_ms: _ } => {
                 // Simplified: just wait for document complete
                 loop {
-                    let ready: String = page
-                        .evaluate("document.readyState")
-                        .await?;
+                    let ready: String = page.evaluate("document.readyState").await?;
                     if ready == "complete" {
                         break;
                     }

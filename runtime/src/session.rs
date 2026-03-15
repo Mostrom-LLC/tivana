@@ -64,7 +64,10 @@ impl std::fmt::Debug for Session {
             .field("browser", &self.browser.is_some())
             .field("created_at", &self.created_at)
             .field("config", &self.config)
-            .field("mutation_observer", &self.mutation_observer_handle.is_some())
+            .field(
+                "mutation_observer",
+                &self.mutation_observer_handle.is_some(),
+            )
             .finish()
     }
 }
@@ -258,7 +261,11 @@ impl SessionRegistry {
     }
 
     /// Complete session launch with browser handle
-    pub async fn complete_launch(&self, id: &str, browser: BrowserHandle) -> Result<(), TivanaError> {
+    pub async fn complete_launch(
+        &self,
+        id: &str,
+        browser: BrowserHandle,
+    ) -> Result<(), TivanaError> {
         let mut sessions = self.sessions.write().await;
         let session = sessions
             .get_mut(id)

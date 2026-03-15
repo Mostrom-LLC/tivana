@@ -3,14 +3,17 @@
 //! This is the Rust runtime that launches Chromium, streams page state via WebSocket,
 //! and executes agent actions.
 
+#![allow(clippy::result_large_err)]
+#![allow(dead_code)]
+
+mod act;
+mod browser;
 mod cli;
 mod error;
+mod perceive;
 mod protocol;
 mod server;
 mod session;
-mod browser;
-mod perceive;
-mod act;
 
 use clap::Parser;
 use tracing::info;
