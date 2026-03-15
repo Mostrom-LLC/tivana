@@ -130,7 +130,7 @@ impl Server {
             }),
         );
         let hello_msg = serialize_outbound(&OutboundMessage::Event(hello))?;
-        write.send(Message::Text(hello_msg.into())).await?;
+        write.send(Message::Text(hello_msg)).await?;
 
         while let Some(msg) = read.next().await {
             match msg {
@@ -138,7 +138,7 @@ impl Server {
                     debug!(peer = %addr, len = text.len(), "Received message");
                     let response = self.handle_message(&text).await;
                     let response_json = serialize_outbound(&response)?;
-                    write.send(Message::Text(response_json.into())).await?;
+                    write.send(Message::Text(response_json)).await?;
                 }
                 Ok(Message::Binary(data)) => {
                     warn!(peer = %addr, len = data.len(), "Received binary (not supported)");
@@ -171,10 +171,7 @@ impl Server {
     }
 
     /// Route request to appropriate handler
-    async fn route_request(
-        &self,
-        request: crate::protocol::RequestMessage,
-    ) -> ResponseMessage {
+    async fn route_request(&self, request: crate::protocol::RequestMessage) -> ResponseMessage {
         let id = request.id.clone();
 
         let result = match request.method.as_str() {
@@ -245,11 +242,26 @@ impl Server {
         let target = params.get("target")?;
 
         Some(ActionTarget {
-            element_id: target.get("elementId").and_then(|v| v.as_str()).map(String::from),
-            selector: target.get("selector").and_then(|v| v.as_str()).map(String::from),
-            text: target.get("text").and_then(|v| v.as_str()).map(String::from),
-            role: target.get("role").and_then(|v| v.as_str()).map(String::from),
-            label: target.get("label").and_then(|v| v.as_str()).map(String::from),
+            element_id: target
+                .get("elementId")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            selector: target
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            text: target
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            role: target
+                .get("role")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            label: target
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             coordinates: target.get("coordinates").and_then(|v| {
                 let x = v.get("x").and_then(|x| x.as_f64())?;
                 let y = v.get("y").and_then(|y| y.as_f64())?;
@@ -324,9 +336,9 @@ impl Server {
                 .await
                 .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-            Actor::navigate(&page, &url)
-                .await
-                .map_err(|e| ProtocolError::new(crate::error::ErrorCode::NavigationFailed, e.to_string()))?;
+            Actor::navigate(&page, &url).await.map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::NavigationFailed, e.to_string())
+            })?;
         }
 
         let info = self.sessions.get(&session_id).await.unwrap();
@@ -392,9 +404,9 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let result = Actor::navigate(&page, url)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::NavigationFailed, e.to_string()))?;
+        let result = Actor::navigate(&page, url).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::NavigationFailed, e.to_string())
+        })?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }
@@ -411,7 +423,10 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let url = page.url().await.map_err(|e| ProtocolError::internal(e.to_string()))?;
+        let url = page
+            .url()
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
         Ok(serde_json::json!({
             "url": url
@@ -432,9 +447,9 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let state = Perceiver::page_state(&page)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+        let state = Perceiver::page_state(&page).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
+        })?;
 
         Ok(serde_json::to_value(&state).unwrap_or_default())
     }
@@ -451,9 +466,9 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let elements = Perceiver::elements(&page)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+        let elements = Perceiver::elements(&page).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
+        })?;
 
         Ok(serde_json::json!({
             "elements": elements,
@@ -475,7 +490,9 @@ impl Server {
 
         let snapshot = Perceiver::accessibility_snapshot(&page)
             .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
+            })?;
 
         Ok(serde_json::to_value(&snapshot).unwrap_or_default())
     }
@@ -492,9 +509,9 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let content = Perceiver::text_content(&page)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+        let content = Perceiver::text_content(&page).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
+        })?;
 
         Ok(serde_json::to_value(&content).unwrap_or_default())
     }
@@ -511,9 +528,9 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let metadata = Perceiver::metadata(&page)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+        let metadata = Perceiver::metadata(&page).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
+        })?;
 
         Ok(serde_json::to_value(&metadata).unwrap_or_default())
     }
@@ -548,9 +565,9 @@ impl Server {
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
         // Set up the mutation observer
-        let (rx, handle) = setup_mutation_observer(&page)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+        let (rx, handle) = setup_mutation_observer(&page).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
+        })?;
 
         // Store the observer handle in the session
         self.sessions
@@ -627,9 +644,9 @@ impl Server {
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
         // Stop the JavaScript observer
-        stop_mutation_observer(&page)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string()))?;
+        stop_mutation_observer(&page).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
+        })?;
 
         // Stop the session-side observer
         self.sessions
@@ -671,9 +688,9 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let result = Actor::click(&page, &target, &options)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+        let result = Actor::click(&page, &target, &options).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
+        })?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }
@@ -706,7 +723,9 @@ impl Server {
 
         let result = Actor::type_text(&page, text, target.as_ref(), &options)
             .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
+            })?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }
@@ -735,9 +754,9 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let result = Actor::press(&page, key, &modifiers)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+        let result = Actor::press(&page, key, &modifiers).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
+        })?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }
@@ -783,7 +802,9 @@ impl Server {
 
         let result = Actor::scroll(&page, target.as_ref(), &options)
             .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
+            })?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }
@@ -803,9 +824,9 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let result = Actor::hover(&page, &target)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+        let result = Actor::hover(&page, &target).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
+        })?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }
@@ -825,9 +846,9 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let result = Actor::focus(&page, &target)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+        let result = Actor::focus(&page, &target).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
+        })?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }
@@ -853,9 +874,9 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let result = Actor::select(&page, &target, value)
-            .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+        let result = Actor::select(&page, &target, value).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
+        })?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }
@@ -886,7 +907,9 @@ impl Server {
 
         let result = Actor::wait_for(&page, &condition, timeout_ms)
             .await
-            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionTimeout, e.to_string()))?;
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::ActionTimeout, e.to_string())
+            })?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }

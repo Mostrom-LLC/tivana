@@ -205,7 +205,9 @@ impl PageHandle {
 
         let success: bool = self.evaluate(&script).await?;
         if !success {
-            return Err(TivanaError::Browser("No active element to type into".to_string()));
+            return Err(TivanaError::Browser(
+                "No active element to type into".to_string(),
+            ));
         }
         Ok(())
     }

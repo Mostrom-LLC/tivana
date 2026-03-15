@@ -19,8 +19,10 @@ fn chrome_path() -> Option<String> {
     }
 
     // Check Playwright cache
-    let playwright_path =
-        format!("{}/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome", env::var("HOME").unwrap_or_default());
+    let playwright_path = format!(
+        "{}/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+        env::var("HOME").unwrap_or_default()
+    );
     if std::path::Path::new(&playwright_path).exists() {
         return Some(playwright_path);
     }
@@ -196,7 +198,9 @@ async fn test_browser_launch_and_navigate() {
         .await;
 
     // Focus input
-    let _ = page.evaluate("document.querySelector('input')?.focus()").await;
+    let _ = page
+        .evaluate("document.querySelector('input')?.focus()")
+        .await;
 
     // Type using CDP
     use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
@@ -248,9 +252,7 @@ async fn test_element_perception() {
         .await
         .expect("Failed to launch browser");
 
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
     let page = browser
         .new_page("about:blank")
@@ -302,7 +304,10 @@ async fn test_element_perception() {
         .into_value()
         .expect("Failed to parse elements");
 
-    println!("Elements: {}", serde_json::to_string_pretty(&elements).unwrap());
+    println!(
+        "Elements: {}",
+        serde_json::to_string_pretty(&elements).unwrap()
+    );
 
     let elements_arr = elements.as_array().expect("Expected array");
     assert!(!elements_arr.is_empty(), "Should have found elements");

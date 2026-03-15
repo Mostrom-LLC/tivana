@@ -202,10 +202,7 @@ pub enum MutationEvent {
     },
     /// Text content changed
     #[serde(rename_all = "camelCase")]
-    TextChanged {
-        element_id: String,
-        text: String,
-    },
+    TextChanged { element_id: String, text: String },
 }
 
 /// Error type for perception operations
@@ -407,7 +404,10 @@ fn parse_mutation_event(value: &serde_json::Value) -> Option<MutationEvent> {
     match event_type {
         "added" => Some(MutationEvent::Added {
             element_id: value.get("elementId")?.as_str()?.to_string(),
-            parent_id: value.get("parentId").and_then(|v| v.as_str()).map(String::from),
+            parent_id: value
+                .get("parentId")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         }),
         "removed" => Some(MutationEvent::Removed {
             element_id: value.get("elementId")?.as_str()?.to_string(),
@@ -415,8 +415,14 @@ fn parse_mutation_event(value: &serde_json::Value) -> Option<MutationEvent> {
         "changed" => Some(MutationEvent::Changed {
             element_id: value.get("elementId")?.as_str()?.to_string(),
             attribute: value.get("attribute")?.as_str()?.to_string(),
-            old_value: value.get("oldValue").and_then(|v| v.as_str()).map(String::from),
-            new_value: value.get("newValue").and_then(|v| v.as_str()).map(String::from),
+            old_value: value
+                .get("oldValue")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            new_value: value
+                .get("newValue")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         }),
         "textChanged" => Some(MutationEvent::TextChanged {
             element_id: value.get("elementId")?.as_str()?.to_string(),
@@ -693,9 +699,7 @@ impl Perceiver {
     pub async fn text_content(page: &Arc<PageHandle>) -> Result<TextContent, TivanaError> {
         debug!("Getting text content");
 
-        let text: String = page
-            .evaluate("document.body?.innerText || ''")
-            .await?;
+        let text: String = page.evaluate("document.body?.innerText || ''").await?;
 
         let word_count = text.split_whitespace().count();
         let char_count = text.chars().count();
@@ -980,7 +984,10 @@ mod tests {
         let event = parse_mutation_event(&json);
         assert!(event.is_some());
         match event.unwrap() {
-            MutationEvent::Added { element_id, parent_id } => {
+            MutationEvent::Added {
+                element_id,
+                parent_id,
+            } => {
                 assert_eq!(element_id, "e10");
                 assert_eq!(parent_id, Some("e1".to_string()));
             }
@@ -1018,7 +1025,12 @@ mod tests {
         let event = parse_mutation_event(&json);
         assert!(event.is_some());
         match event.unwrap() {
-            MutationEvent::Changed { element_id, attribute, old_value, new_value } => {
+            MutationEvent::Changed {
+                element_id,
+                attribute,
+                old_value,
+                new_value,
+            } => {
                 assert_eq!(element_id, "e3");
                 assert_eq!(attribute, "disabled");
                 assert!(old_value.is_none());

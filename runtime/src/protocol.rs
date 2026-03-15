@@ -217,8 +217,7 @@ mod tests {
 
     #[test]
     fn test_response_error() {
-        let response =
-            ResponseMessage::error("req-1", ProtocolError::session_not_found("unknown"));
+        let response = ResponseMessage::error("req-1", ProtocolError::session_not_found("unknown"));
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("req-1"));
         assert!(json.contains("session_not_found"));

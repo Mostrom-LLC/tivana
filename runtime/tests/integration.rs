@@ -120,13 +120,16 @@ async fn test_browser_launch_and_close() {
     let chrome = require_chrome!();
     let config = test_browser_config(&chrome);
 
-    let (browser, mut handler) = Browser::launch(config).await.expect("Failed to launch browser");
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    let (browser, mut handler) = Browser::launch(config)
+        .await
+        .expect("Failed to launch browser");
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
     // Create a page
-    let page = browser.new_page("about:blank").await.expect("Failed to create page");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
 
     // Verify page exists
     let url: String = page
@@ -150,9 +153,7 @@ async fn test_navigate_to_url() {
     let config = test_browser_config(&chrome);
 
     let (browser, mut handler) = Browser::launch(config).await.expect("Failed to launch");
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
     let page = browser
         .new_page("https://example.com")
@@ -191,9 +192,7 @@ async fn test_perceive_page_state() {
     let config = test_browser_config(&chrome);
 
     let (browser, mut handler) = Browser::launch(config).await.expect("Failed to launch");
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
     let page = browser
         .new_page("https://example.com")
@@ -240,8 +239,14 @@ async fn test_perceive_page_state() {
 
     assert!(state.url.contains("example.com"), "URL should be set");
     assert!(!state.title.is_empty(), "Title should be set");
-    assert!(state.viewport_width > 0.0, "Viewport width should be positive");
-    assert!(state.viewport_height > 0.0, "Viewport height should be positive");
+    assert!(
+        state.viewport_width > 0.0,
+        "Viewport width should be positive"
+    );
+    assert!(
+        state.viewport_height > 0.0,
+        "Viewport height should be positive"
+    );
 
     println!("✅ Perceive pageState test passed - {:?}", state);
 }
@@ -257,9 +262,7 @@ async fn test_perceive_elements() {
     let config = test_browser_config(&chrome);
 
     let (browser, mut handler) = Browser::launch(config).await.expect("Failed to launch");
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
     let page = browser
         .new_page("https://example.com")
@@ -321,16 +324,31 @@ async fn test_perceive_elements() {
         .expect("Failed to parse");
 
     println!("Found {} interactive elements", elements.len());
-    assert!(!elements.is_empty(), "example.com should have interactive elements");
+    assert!(
+        !elements.is_empty(),
+        "example.com should have interactive elements"
+    );
 
     // Verify element structure
     let first = &elements[0];
     assert!(first["id"].is_string(), "Element should have id");
     assert!(first["role"].is_string(), "Element should have role");
-    assert!(first["bounds"]["x"].is_number(), "Element should have bounds.x");
-    assert!(first["bounds"]["y"].is_number(), "Element should have bounds.y");
-    assert!(first["bounds"]["width"].is_number(), "Element should have bounds.width");
-    assert!(first["bounds"]["height"].is_number(), "Element should have bounds.height");
+    assert!(
+        first["bounds"]["x"].is_number(),
+        "Element should have bounds.x"
+    );
+    assert!(
+        first["bounds"]["y"].is_number(),
+        "Element should have bounds.y"
+    );
+    assert!(
+        first["bounds"]["width"].is_number(),
+        "Element should have bounds.width"
+    );
+    assert!(
+        first["bounds"]["height"].is_number(),
+        "Element should have bounds.height"
+    );
 
     println!("✅ Perceive elements test passed");
 }
@@ -346,11 +364,12 @@ async fn test_perceive_mutations() {
     let config = test_browser_config(&chrome);
 
     let (browser, mut handler) = Browser::launch(config).await.expect("Failed to launch");
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
-    let page = browser.new_page("about:blank").await.expect("Failed to create page");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
 
     // Set up mutation observer (mirrors perceive.mutations)
     let setup_result: serde_json::Value = page
@@ -416,9 +435,11 @@ async fn test_perceive_mutations() {
     assert_eq!(setup_result["status"], "started");
 
     // Trigger DOM mutations
-    page.evaluate(r#"document.body.innerHTML = '<div id="test1">Hello</div><button id="btn">Click</button>'"#)
-        .await
-        .expect("Failed to modify DOM");
+    page.evaluate(
+        r#"document.body.innerHTML = '<div id="test1">Hello</div><button id="btn">Click</button>'"#,
+    )
+    .await
+    .expect("Failed to modify DOM");
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -476,11 +497,12 @@ async fn test_act_click() {
     let config = test_browser_config(&chrome);
 
     let (browser, mut handler) = Browser::launch(config).await.expect("Failed to launch");
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
-    let page = browser.new_page("about:blank").await.expect("Failed to create page");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
 
     // Create a clickable button that tracks clicks
     page.evaluate(
@@ -511,7 +533,7 @@ async fn test_act_click() {
     let y = pos["y"].as_f64().unwrap();
 
     // Click using JavaScript dispatch (mirrors act.click)
-    page.evaluate(&format!(
+    page.evaluate(format!(
         r#"(() => {{
             const el = document.elementFromPoint({}, {});
             if (!el) return false;
@@ -552,11 +574,12 @@ async fn test_act_type() {
     let config = test_browser_config(&chrome);
 
     let (browser, mut handler) = Browser::launch(config).await.expect("Failed to launch");
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
-    let page = browser.new_page("about:blank").await.expect("Failed to create page");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
 
     // Create an input field
     page.evaluate(r#"document.body.innerHTML = '<input type="text" id="input">'"#)
@@ -597,11 +620,12 @@ async fn test_act_scroll() {
     let config = test_browser_config(&chrome);
 
     let (browser, mut handler) = Browser::launch(config).await.expect("Failed to launch");
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
-    let page = browser.new_page("about:blank").await.expect("Failed to create page");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
 
     // Create a long page
     page.evaluate(
@@ -672,11 +696,12 @@ async fn test_target_not_found_error() {
     let config = test_browser_config(&chrome);
 
     let (browser, mut handler) = Browser::launch(config).await.expect("Failed to launch");
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
-    let page = browser.new_page("about:blank").await.expect("Failed to create page");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
 
     // Try to find non-existent element
     let result: Option<serde_json::Value> = page
@@ -693,7 +718,10 @@ async fn test_target_not_found_error() {
         .into_value()
         .expect("Failed to parse");
 
-    assert!(result.is_none(), "Should return null for non-existent element");
+    assert!(
+        result.is_none(),
+        "Should return null for non-existent element"
+    );
 
     // Verify this triggers target_not_found in Tivana's Actor
     // (The actual error is raised by Actor::resolve_target)
@@ -711,15 +739,18 @@ async fn test_e2e_smoke() {
     let config = test_browser_config(&chrome);
 
     let (browser, mut handler) = Browser::launch(config).await.expect("Failed to launch");
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
     println!("1. Creating session (page)...");
-    let page = browser.new_page("about:blank").await.expect("Failed to create page");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
 
     println!("2. Navigating to example.com...");
-    page.goto("https://example.com").await.expect("Navigation failed");
+    page.goto("https://example.com")
+        .await
+        .expect("Navigation failed");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     println!("3. Getting page state (perceive.pageState)...");
@@ -741,9 +772,7 @@ async fn test_e2e_smoke() {
 
     println!("4. Getting elements (perceive.elements)...");
     let element_count: i64 = page
-        .evaluate(
-            "document.querySelectorAll('a[href], button, input, [role=\"button\"]').length",
-        )
+        .evaluate("document.querySelectorAll('a[href], button, input, [role=\"button\"]').length")
         .await
         .expect("Failed")
         .into_value()
@@ -794,9 +823,7 @@ async fn test_full_session_workflow() {
     let config = test_browser_config(&chrome);
 
     let (browser, mut handler) = Browser::launch(config).await.expect("Failed to launch");
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
     // Create page and navigate
     let page = browser
@@ -822,7 +849,10 @@ async fn test_full_session_workflow() {
         .into_value()
         .expect("Failed");
 
-    println!("Page state: {}", serde_json::to_string_pretty(&state).unwrap());
+    println!(
+        "Page state: {}",
+        serde_json::to_string_pretty(&state).unwrap()
+    );
 
     // perceive.elements
     let elements: Vec<serde_json::Value> = page
@@ -851,7 +881,7 @@ async fn test_full_session_workflow() {
         let x = bounds["x"].as_f64().unwrap() + bounds["width"].as_f64().unwrap() / 2.0;
         let y = bounds["y"].as_f64().unwrap() + bounds["height"].as_f64().unwrap() / 2.0;
 
-        page.evaluate(&format!(
+        page.evaluate(format!(
             r#"(() => {{
                 const el = document.elementFromPoint({}, {});
                 el?.click();
