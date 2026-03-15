@@ -46,6 +46,39 @@ jobs:
         working-directory: runtime
         run: cargo clippy -- -D warnings
 
+  browser-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            runtime/target/
+          key: ${{ runner.os }}-cargo-browser-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser
+          echo "CHROME_PATH=/usr/bin/chromium-browser" >> $GITHUB_ENV
+
+      - name: Build runtime
+        working-directory: runtime
+        run: cargo build --verbose
+
+      - name: Run browser integration tests
+        working-directory: runtime
+        run: cargo test --test integration -- --ignored --nocapture --test-threads=1
+
   sdk:
     runs-on: ubuntu-latest
     steps:
