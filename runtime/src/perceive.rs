@@ -254,7 +254,7 @@ pub async fn setup_mutation_observer(
         // Store mutations in a global array
         window.__tivana_mutations = window.__tivana_mutations || [];
         window.__tivana_element_counter = window.__tivana_element_counter || 1;
-        
+
         // Helper to get or create element ID
         const getElementId = (el) => {
             if (!el || el.nodeType !== 1) return null;
@@ -263,17 +263,17 @@ pub async fn setup_mutation_observer(
             }
             return el.dataset.tivanaId;
         };
-        
+
         // Skip if observer already exists
         if (window.__tivana_observer) {
             return { status: 'already_running' };
         }
-        
+
         // Create the MutationObserver
         window.__tivana_observer = new MutationObserver((mutations) => {
             for (const mutation of mutations) {
                 const targetId = getElementId(mutation.target);
-                
+
                 if (mutation.type === 'childList') {
                     // Handle added nodes
                     for (const node of mutation.addedNodes) {
@@ -287,7 +287,7 @@ pub async fn setup_mutation_observer(
                             });
                         }
                     }
-                    
+
                     // Handle removed nodes
                     for (const node of mutation.removedNodes) {
                         if (node.nodeType === 1) {
@@ -316,7 +316,7 @@ pub async fn setup_mutation_observer(
                 }
             }
         });
-        
+
         // Start observing
         window.__tivana_observer.observe(document.documentElement, {
             childList: true,
@@ -326,7 +326,7 @@ pub async fn setup_mutation_observer(
             characterData: true,
             characterDataOldValue: true
         });
-        
+
         return { status: 'started' };
     })()"#;
 
@@ -387,7 +387,7 @@ pub async fn setup_mutation_observer(
                         delete window.__tivana_mutations;
                         return { status: 'stopped' };
                     })()"#;
-                    
+
                     let _ = page_clone.evaluate::<serde_json::Value>(cleanup_script).await;
                     debug!("Mutation observer stopped");
                     return;
@@ -539,7 +539,7 @@ impl Perceiver {
         let script = r#"(() => {
             const elements = [];
             let elementCounter = 1;
-            
+
             // Interactive element selectors
             const selector = [
                 'a[href]',
@@ -563,27 +563,27 @@ impl Perceiver {
                 '[tabindex]:not([tabindex="-1"])',
                 '[contenteditable="true"]'
             ].join(', ');
-            
+
             const interactiveElements = document.querySelectorAll(selector);
-            
+
             for (const el of interactiveElements) {
                 // Skip hidden elements
                 const style = window.getComputedStyle(el);
                 if (style.display === 'none' || style.visibility === 'hidden') {
                     continue;
                 }
-                
+
                 const rect = el.getBoundingClientRect();
                 if (rect.width === 0 && rect.height === 0) {
                     continue;
                 }
-                
+
                 // Determine role
                 let role = el.getAttribute('role') || el.tagName.toLowerCase();
                 if (role === 'input') {
                     role = el.type || 'text';
                 }
-                
+
                 // Get accessible name
                 let name = el.getAttribute('aria-label') ||
                            el.getAttribute('aria-labelledby') && document.getElementById(el.getAttribute('aria-labelledby'))?.textContent ||
@@ -592,13 +592,13 @@ impl Perceiver {
                            el.innerText?.trim()?.slice(0, 100) ||
                            el.value ||
                            null;
-                
+
                 // Get value for inputs
                 let value = null;
                 if (el.value !== undefined && el.value !== '') {
                     value = el.value;
                 }
-                
+
                 // Check states
                 const focused = document.activeElement === el;
                 const enabled = !el.disabled;
@@ -606,7 +606,7 @@ impl Perceiver {
                 const selected = el.selected !== undefined ? el.selected : undefined;
                 const expanded = el.getAttribute('aria-expanded') ? el.getAttribute('aria-expanded') === 'true' : undefined;
                 const required = el.required !== undefined ? el.required : undefined;
-                
+
                 // Get styles
                 const styles = {
                     font_family: style.fontFamily,
@@ -618,7 +618,7 @@ impl Perceiver {
                     display: style.display,
                     visibility: style.visibility
                 };
-                
+
                 elements.push({
                     id: 'e' + (elementCounter++),
                     role: role,
@@ -641,7 +641,7 @@ impl Perceiver {
                     children: []
                 });
             }
-            
+
             return elements;
         })()"#;
 
@@ -728,12 +728,12 @@ impl Perceiver {
                     const el = document.querySelector(`meta[name="${name}"], meta[property="${name}"]`);
                     return el?.content || null;
                 };
-                
+
                 const getLink = (rel) => {
                     const el = document.querySelector(`link[rel="${rel}"], link[rel="shortcut icon"]`);
                     return el?.href || null;
                 };
-                
+
                 return {
                     url: window.location.href,
                     title: document.title || null,
@@ -804,7 +804,7 @@ impl Perceiver {
         debug!(role, ?name, "Finding element by role and name");
 
         let name_match = name
-            .map(|n| format!(r#"&& (name?.toLowerCase().includes({}.toLowerCase()) || el.innerText?.toLowerCase().includes({}.toLowerCase()))"#, 
+            .map(|n| format!(r#"&& (name?.toLowerCase().includes({}.toLowerCase()) || el.innerText?.toLowerCase().includes({}.toLowerCase()))"#,
                 serde_json::to_string(n).unwrap_or_default(),
                 serde_json::to_string(n).unwrap_or_default()))
             .unwrap_or_default();
@@ -815,13 +815,13 @@ impl Perceiver {
                 for (const el of elements) {{
                     const elRole = el.getAttribute('role') || el.tagName.toLowerCase();
                     const name = el.getAttribute('aria-label') || el.innerText?.trim();
-                    
+
                     const targetRole = {role_json}.toLowerCase();
                     const matchRole = elRole.toLowerCase() === targetRole ||
                         (targetRole === 'button' && (elRole === 'button' || el.tagName === 'BUTTON')) ||
                         (targetRole === 'link' && (elRole === 'link' || el.tagName === 'A')) ||
                         (targetRole === 'textbox' && (elRole === 'textbox' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'));
-                    
+
                     if (matchRole {name_match}) {{
                         const rect = el.getBoundingClientRect();
                         if (rect.width > 0 && rect.height > 0) {{

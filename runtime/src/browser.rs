@@ -181,7 +181,7 @@ impl PageHandle {
                 const text = {};
                 const el = document.activeElement;
                 if (!el) return false;
-                
+
                 if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{
                     // For form elements, set value and trigger events
                     const start = el.selectionStart || 0;
@@ -202,7 +202,7 @@ impl PageHandle {
             }})()"#,
             serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
         );
-        
+
         let success: bool = self.evaluate(&script).await?;
         if !success {
             return Err(TivanaError::Browser("No active element to type into".to_string()));

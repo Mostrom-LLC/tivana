@@ -670,9 +670,9 @@ impl Actor {
                         if (!el) return false;
                         const style = window.getComputedStyle(el);
                         const rect = el.getBoundingClientRect();
-                        return style.display !== 'none' && 
-                               style.visibility !== 'hidden' && 
-                               rect.width > 0 && 
+                        return style.display !== 'none' &&
+                               style.visibility !== 'hidden' &&
+                               rect.width > 0 &&
                                rect.height > 0;
                     }})()"#,
                     serde_json::to_string(selector).unwrap_or_default()
