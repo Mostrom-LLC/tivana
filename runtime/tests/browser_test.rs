@@ -269,11 +269,11 @@ async fn test_element_perception() {
             r#"(() => {
             const elements = [];
             let counter = 0;
-            
+
             document.querySelectorAll('h1, h2, h3, p, a, button, input').forEach(el => {
                 const rect = el.getBoundingClientRect();
                 const style = window.getComputedStyle(el);
-                
+
                 elements.push({
                     id: 'e' + (++counter),
                     tag: el.tagName.toLowerCase(),
@@ -293,7 +293,7 @@ async fn test_element_perception() {
                     visible: rect.width > 0 && rect.height > 0
                 });
             });
-            
+
             return elements;
         })()"#,
         )
