@@ -703,14 +703,15 @@ async fn test_target_not_found_error() {
         .await
         .expect("Failed to create page");
 
-    // Try to find non-existent element
-    let result: Option<serde_json::Value> = page
+    // Try to find non-existent element - returns "not_found" string instead of null
+    // to avoid chromiumoxide parsing issues with null values
+    let result: String = page
         .evaluate(
             r#"(() => {
             const el = document.querySelector('#does-not-exist');
-            if (!el) return null;
+            if (!el) return "not_found";
             const rect = el.getBoundingClientRect();
-            return { x: rect.x, y: rect.y };
+            return JSON.stringify({ x: rect.x, y: rect.y });
         })()"#,
         )
         .await
@@ -718,9 +719,9 @@ async fn test_target_not_found_error() {
         .into_value()
         .expect("Failed to parse");
 
-    assert!(
-        result.is_none(),
-        "Should return null for non-existent element"
+    assert_eq!(
+        result, "not_found",
+        "Should return 'not_found' for non-existent element"
     );
 
     // Verify this triggers target_not_found in Tivana's Actor
