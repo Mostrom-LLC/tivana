@@ -79,6 +79,10 @@ jobs:
         working-directory: runtime
         run: cargo test --test integration -- --ignored --nocapture --test-threads=1
 
+      - name: Run realistic browser integration tests
+        working-directory: runtime
+        run: cargo test --test realistic_browser_test -- --ignored --nocapture --test-threads=1
+
   sdk:
     runs-on: ubuntu-latest
     steps:

@@ -202,11 +202,45 @@ Options:
 # Rust unit tests
 cargo test
 
+# Browser integration tests (requires Chromium)
+# Set CHROME_PATH or have Chromium in PATH
+cargo test --test browser_test -- --ignored --nocapture
+
+# Realistic browser integration tests (uses https://the-internet.herokuapp.com)
+cargo test --test realistic_browser_test -- --ignored --nocapture --test-threads=1
+
 # SDK smoke test (requires runtime)
 ./target/release/tivana start &
 cd sdk/ts
 bun run smoke-test.ts
 ```
+
+### Test Coverage
+
+#### Basic Browser Tests (`browser_test.rs`)
+- Browser launch and navigation
+- Element perception
+- CDP connection
+
+#### Realistic Browser Tests (`realistic_browser_test.rs`)
+Tests against [the-internet.herokuapp.com](https://the-internet.herokuapp.com):
+
+| Test | URL | Coverage |
+|------|-----|----------|
+| `test_login_form_submission` | `/login` | Form fill, submit, success validation |
+| `test_login_form_validation_failure` | `/login` | Invalid credentials, error messages |
+| `test_dynamic_loading_*` | `/dynamic_loading/*` | Async content, wait-for patterns |
+| `test_javascript_alert_*` | `/javascript_alerts` | Alert, confirm, prompt dialogs |
+| `test_iframe_interaction` | `/iframe` | Cross-frame content manipulation |
+| `test_nested_frames` | `/nested_frames` | Multi-level frame traversal |
+| `test_shadow_dom_traversal` | `/shadowdom` | Shadow DOM piercing |
+| `test_dropdown_selection` | `/dropdown` | Select element interaction |
+| `test_checkboxes` | `/checkboxes` | Checkbox state toggling |
+| `test_hover_and_hidden_content` | `/hovers` | Hover-triggered content |
+| `test_drag_and_drop` | `/drag_and_drop` | HTML5 drag events |
+| `test_file_upload` | `/upload` | File input UI verification |
+| `test_key_presses` | `/key_presses` | Keyboard event handling |
+| `test_infinite_scroll` | `/infinite_scroll` | Scroll-triggered content loading |
 
 ## Documentation
 
