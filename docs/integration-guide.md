@@ -19,13 +19,13 @@ The binary will be at `./target/release/tivana`.
 
 ```bash
 # Headed mode (browser visible)
-./target/release/tivana start
+./target/release/tivana
 
 # Headless mode (no browser window)
-./target/release/tivana start --headless
+./target/release/tivana --headless
 
 # Custom port
-./target/release/tivana start --port 8080
+./target/release/tivana --port 8080
 ```
 
 Default port is **9876**.
@@ -110,7 +110,7 @@ bun install  # or npm install
 cargo test
 
 # SDK smoke test (requires runtime running)
-./target/release/tivana start &
+./target/release/tivana &
 cd sdk/ts
 bun run smoke-test.ts
 ```
@@ -307,7 +307,7 @@ switch (action.action) {
 ## CLI Options
 
 ```bash
-tivana start [OPTIONS]
+tivana [OPTIONS]
 
 Options:
   --port <PORT>        WebSocket server port (default: 9876)
@@ -329,7 +329,7 @@ Error: WebSocket connection failed
 ```
 
 **Solutions:**
-1. Make sure the runtime is running: `./target/release/tivana start`
+1. Make sure the runtime is running: `./target/release/tivana`
 2. Check the port is correct (default: 9876)
 3. Check firewall settings
 

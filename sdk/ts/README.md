@@ -87,7 +87,7 @@ await act.scroll("e10");
 
 ```bash
 # Start the runtime first
-./target/release/tivana start &
+./target/release/tivana &
 
 # Run the smoke test
 cd sdk/ts
@@ -98,7 +98,7 @@ npx tsx smoke-test.ts
 
 ## Requirements
 
-- **Runtime**: Tivana runtime must be running (`./target/release/tivana start`)
+- **Runtime**: Tivana runtime must be running (`./target/release/tivana`)
 - **Node.js**: 18+ (uses native WebSocket or `ws` package)
 - **Bun**: 1.0+ (uses native WebSocket)
 
@@ -266,10 +266,10 @@ cd tivana
 cargo build --release
 
 # Start runtime
-./target/release/tivana start --port 9876
+./target/release/tivana --port 9876
 
 # With options
-./target/release/tivana start --headless --port 8080
+./target/release/tivana --headless --port 8080
 ```
 
 ## License

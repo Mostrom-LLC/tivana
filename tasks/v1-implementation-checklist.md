@@ -187,7 +187,7 @@
 ## 10. CLI
 - [x] Implement `tivana` CLI with `clap`
 - [x] Support:
-  - [x] `tivana start` — start server
+  - [x] `tivana` — start server
   - [x] `--port <port>` — port selection (default: 9876)
   - [x] `--headless` / `--headed` — browser visibility
   - [x] `--chrome-path <path>` — chromium executable override
@@ -219,7 +219,7 @@
 
 ## 12. Local verification
 ### Runtime verification
-- [ ] Start runtime locally (`tivana start`)
+- [ ] Start runtime locally (`tivana`)
 - [ ] Connect with TS SDK
 - [ ] Create session
 - [ ] Chromium launches (visible in headed mode)
