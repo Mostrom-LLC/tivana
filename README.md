@@ -40,7 +40,7 @@ cargo build --release
 
 ```bash
 # From tivana/runtime directory
-./target/release/tivana start
+./target/release/tivana
 
 # Options:
 #   --headless    Run without browser window
@@ -193,7 +193,7 @@ await client.waitFor({ type: "Navigation" }); // Wait for condition
 ## CLI Reference
 
 ```bash
-tivana start [OPTIONS]
+tivana [OPTIONS]
 
 Options:
   --port <PORT>        WebSocket server port (default: 9876)
@@ -239,7 +239,7 @@ cargo test --test browser_test -- --ignored --nocapture
 cargo test --test realistic_browser_test -- --ignored --nocapture --test-threads=1
 
 # SDK smoke test (requires runtime)
-./target/release/tivana start &
+./target/release/tivana &
 cd sdk/ts
 bun run smoke-test.ts
 ```

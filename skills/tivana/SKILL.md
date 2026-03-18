@@ -28,10 +28,10 @@ cd tivana/runtime
 cargo build --release
 
 # Start the runtime (headed mode - browser visible)
-./target/release/tivana start
+./target/release/tivana
 
 # Or headless mode (no browser window)
-./target/release/tivana start --headless
+./target/release/tivana --headless
 ```
 
 The runtime listens on `ws://localhost:9876` by default.
@@ -260,7 +260,7 @@ try {
 |-------|-------|----------|
 | `target_not_found` | Element ID doesn't exist | Call `elements()` to get fresh IDs after navigation |
 | `session_not_found` | No browser session | Call `createSession()` first |
-| `connection_refused` | Runtime not running | Start runtime with `tivana start` |
+| `connection_refused` | Runtime not running | Start runtime with `tivana` |
 | `timeout` | Action took too long | Increase timeout or check page state |
 
 ## Tips

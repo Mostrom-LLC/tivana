@@ -79,22 +79,22 @@ cargo build --release --target x86_64-unknown-linux-gnu
 
 ```bash
 # Headed mode (default) - browser visible
-./target/release/tivana start
+./target/release/tivana
 
 # Headless mode - no browser window
-./target/release/tivana start --headless
+./target/release/tivana --headless
 
 # Custom port (default: 9876)
-./target/release/tivana start --port 8080
+./target/release/tivana --port 8080
 
 # Custom Chrome path
-./target/release/tivana start --chrome-path /path/to/chrome
+./target/release/tivana --chrome-path /path/to/chrome
 ```
 
 ### With Debug Logging
 
 ```bash
-RUST_LOG=tivana=debug ./target/release/tivana start --headed
+RUST_LOG=tivana=debug ./target/release/tivana --headed
 ```
 
 ### Verifying Runtime
@@ -158,30 +158,28 @@ cargo test --test browser_test -- --ignored --nocapture
 cargo test --test realistic_browser_test -- --ignored --nocapture --test-threads=1
 ```
 
-### SDK Tests
+### SDK Smoke Test
 
-```bash
-cd sdk/ts
-
-# All tests
-bun test
-
-# Specific test file
-bun test tests/client.test.ts
-
-# With coverage
-bun test --coverage
-```
-
-### End-to-End Smoke Test
+The SDK doesn't have unit tests — it requires the runtime to be running. Use the smoke test for validation:
 
 ```bash
 # Terminal 1: Start runtime
-./target/release/tivana start
+./target/release/tivana
 
 # Terminal 2: Run smoke test
 cd sdk/ts
 bun run smoke-test.ts
+```
+
+The smoke test connects to the runtime, navigates to a page, and verifies perception/action methods.
+
+### SDK Type Checking
+
+```bash
+cd sdk/ts
+
+# Type check only (no runtime required)
+bun run typecheck
 ```
 
 ### Running All Tests (CI-style)
@@ -190,7 +188,7 @@ bun run smoke-test.ts
 # From repo root
 cd runtime && cargo test
 cd runtime && cargo test --test browser_test -- --ignored
-cd sdk/ts && bun install && bun test
+# SDK validation requires runtime - run smoke test manually
 ```
 
 ## Project Structure
@@ -239,8 +237,7 @@ tivana/
 
 1. Edit TypeScript in `sdk/ts/src/`
 2. Run `bun run typecheck` for type errors
-3. Run `bun test` for unit tests
-4. Test manually with `bun run smoke-test.ts`
+3. Test manually with `bun run smoke-test.ts` (requires runtime)
 
 ### Adding a New Action
 
@@ -263,7 +260,7 @@ tivana/
    ```
 2. Specify path explicitly:
    ```bash
-   ./tivana start --chrome-path /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome
+   ./tivana --chrome-path /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome
    ```
 3. In containers, ensure sandbox is disabled (automatic in Tivana)
 4. Check shared memory in Docker: `docker run --shm-size=2g`
@@ -281,7 +278,7 @@ tivana/
 2. Check firewall rules
 3. Use `--host 0.0.0.0` for external access:
    ```bash
-   ./tivana start --host 0.0.0.0 --port 9876
+   ./tivana --host 0.0.0.0 --port 9876
    ```
 
 ### Elements Not Found After Navigation
@@ -331,7 +328,7 @@ await client.click(elements[0].id);
    ```
 2. Use headless mode:
    ```bash
-   ./tivana start --headless
+   ./tivana --headless
    ```
 
 ## Environment Variables
@@ -359,7 +356,7 @@ jobs:
       # Chrome is pre-installed on ubuntu-latest
       - run: cd runtime && cargo test
       - run: cd runtime && cargo test --test browser_test -- --ignored
-      - run: cd sdk/ts && bun install && bun test
+      - run: cd sdk/ts && bun install && bun run typecheck
 ```
 
 ### Docker Build
@@ -374,7 +371,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y chromium && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/runtime/target/release/tivana /usr/local/bin/
 EXPOSE 9876
-CMD ["tivana", "start", "--headless", "--host", "0.0.0.0"]
+CMD ["tivana", "--headless", "--host", "0.0.0.0"]
 ```
 
 ## Contributing
