@@ -4,6 +4,8 @@
 
 Tivana gives AI agents human-like awareness of web pages — not scripted automation, but continuous, semantic perception of page state so agents can explore, notice anomalies, and make judgment calls.
 
+> **Note:** Tivana is not yet published to npm. See [Getting Started](#getting-started) for local installation instructions. npm publish coming soon.
+
 ## Why Tivana?
 
 Existing browser automation tools are built for testing, not agency:
@@ -14,49 +16,54 @@ Existing browser automation tools are built for testing, not agency:
 
 Humans catch bugs that tests miss because we see the whole page, notice things that "feel off," and have continuous awareness. Tivana gives agents the same capability.
 
-## Quick Start
+## Getting Started
 
-### 1. Build the Runtime
+### Prerequisites
+
+- **Rust** 1.75+ ([install](https://rustup.rs))
+- **Bun** 1.0+ ([install](https://bun.sh)) or Node.js 18+
+- **Chromium** browser (Chrome, Edge, Brave, or Arc)
+
+### 1. Clone and Build
 
 ```bash
 # Clone the repo
 git clone https://github.com/Mostrom-LLC/tivana.git
-cd tivana/runtime
+cd tivana
 
-# Build with Rust (requires Rust 1.75+)
+# Build the runtime
+cd runtime
 cargo build --release
 ```
 
 ### 2. Start the Runtime
 
 ```bash
-# Headed mode (see the browser)
+# From tivana/runtime directory
 ./target/release/tivana start
 
-# Headless mode
-./target/release/tivana start --headless
-
-# Custom port
-./target/release/tivana start --port 8080
+# Options:
+#   --headless    Run without browser window
+#   --port 8080   Custom port (default: 9876)
 ```
 
 ### 3. Install the SDK
 
 ```bash
-# Using npm
-npm install tivana
+# Local installation (pre-npm publish)
+cd tivana/sdk/ts
+bun install
 
-# Using bun
-bun add tivana
-
-# Or use local SDK
-cd sdk/ts && bun install
+# Future: npm install tivana (coming soon)
 ```
 
 ### 4. Connect and Interact
 
 ```typescript
-import { TivanaClient } from "tivana";
+// For local development (pre-npm)
+import { TivanaClient } from "./sdk/ts/src/index.js";
+
+// Future: import { TivanaClient } from "tivana";
 
 const client = new TivanaClient();
 await client.connect();
@@ -81,6 +88,28 @@ if (signIn) {
 // Clean up
 await client.closeSession();
 client.disconnect();
+```
+
+### 5. Using from Another Project
+
+Until npm publish, you can use Tivana from another project by:
+
+```bash
+# Option A: npm link
+cd tivana/sdk/ts
+bun link
+cd your-project
+bun link tivana
+
+# Option B: File path in package.json
+{
+  "dependencies": {
+    "tivana": "file:../tivana/sdk/ts"
+  }
+}
+
+# Option C: Direct import
+import { TivanaClient } from "../tivana/sdk/ts/src/index.js";
 ```
 
 ## What the Agent Sees
