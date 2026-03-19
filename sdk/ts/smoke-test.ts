@@ -13,7 +13,7 @@
  *
  * Prerequisites:
  * - Tivana runtime running at ws://localhost:9876
- * - Start with: ./target/release/tivana start
+ * - Start with: ./target/release/tivana --port 9876
  *
  * Run with: bun run smoke-test.ts
  *       or: npx tsx smoke-test.ts
@@ -92,7 +92,7 @@ async function runSmokeTest(): Promise<boolean> {
       console.log(
         dim("\nMake sure the Tivana runtime is running:")
       );
-      console.log(dim("  ./target/release/tivana start"));
+      console.log(dim("  ./target/release/tivana --port 9876"));
       return false;
     }
 
