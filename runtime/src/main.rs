@@ -11,6 +11,7 @@ mod browser;
 mod cli;
 mod error;
 mod perceive;
+mod persistence;
 mod protocol;
 mod server;
 mod session;
@@ -40,10 +41,14 @@ async fn main() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION"),
         args.port
     );
-    info!(
-        "Browser mode: {}",
-        if args.headless { "headless" } else { "headed" }
-    );
+    if let Some(ref target) = args.connect {
+        info!("Browser mode: connect to existing Chrome at {}", target);
+    } else {
+        info!(
+            "Browser mode: {}",
+            if args.headless { "headless" } else { "headed" }
+        );
+    }
 
     // Start the server
     let server = Server::new(args)?;

@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::browser::PageHandle;
@@ -264,6 +266,43 @@ pub enum WaitCondition {
 pub struct Actor;
 
 impl Actor {
+    /// Scroll a target element into the viewport so CDP clicks can reach it
+    async fn scroll_target_into_view(
+        page: &Arc<PageHandle>,
+        target: &ActionTarget,
+    ) -> Result<(), TivanaError> {
+        // Build a JS expression to find the element and scrollIntoView
+        let script = if let Some(ref id) = target.element_id {
+            // Element ID — find by data-tivana-id attribute
+            format!(
+                r#"(() => {{
+                    const el = document.querySelector('[data-tivana-id="' + {} + '"]');
+                    if (el) {{
+                        el.scrollIntoView({{ behavior: 'instant', block: 'center' }});
+                        return true;
+                    }}
+                    return false;
+                }})()"#,
+                serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_string())
+            )
+        } else if let Some(ref selector) = target.selector {
+            format!(
+                r#"(() => {{
+                    const el = document.querySelector({});
+                    if (el) {{ el.scrollIntoView({{ behavior: 'instant', block: 'center' }}); return true; }}
+                    return false;
+                }})()"#,
+                serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string())
+            )
+        } else {
+            // For coordinates or role-based targets, skip scroll
+            return Ok(());
+        };
+
+        let _: Option<bool> = page.evaluate(&script).await.ok();
+        Ok(())
+    }
+
     /// Resolve action target to bounding box
     async fn resolve_target(
         page: &Arc<PageHandle>,
@@ -337,29 +376,106 @@ impl Actor {
         info!(url, "Navigating");
 
         let nav_result = page.navigate(url).await?;
+
+        // Wait for navigation to settle
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
         let duration = start.elapsed().as_millis() as u64;
 
-        let page_state = Perceiver::page_state(page).await?;
+        let page_state = Perceiver::page_state(page).await.ok();
 
-        Ok(ActionResult::success()
-            .with_page_state(page_state)
+        let mut result = ActionResult::success()
             .with_data(serde_json::to_value(&nav_result).unwrap_or_default())
-            .with_duration(duration))
+            .with_duration(duration);
+
+        if let Some(state) = page_state {
+            result = result.with_page_state(state);
+        }
+
+        Ok(result)
     }
 
-    /// Click on a target element
+    /// Generate intermediate points along a cubic Bezier curve for human-like mouse movement
+    fn bezier_points(
+        from: (f64, f64),
+        to: (f64, f64),
+        num_points: usize,
+    ) -> Vec<(f64, f64)> {
+        let mut rng = rand::thread_rng();
+        let dx = to.0 - from.0;
+        let dy = to.1 - from.1;
+
+        // Random control points offset perpendicular to the line
+        let cp1 = (
+            from.0 + dx * 0.25 + rng.gen_range(-30.0..30.0),
+            from.1 + dy * 0.25 + rng.gen_range(-30.0..30.0),
+        );
+        let cp2 = (
+            from.0 + dx * 0.75 + rng.gen_range(-30.0..30.0),
+            from.1 + dy * 0.75 + rng.gen_range(-30.0..30.0),
+        );
+
+        let mut points = Vec::with_capacity(num_points);
+        for i in 1..=num_points {
+            let t = i as f64 / (num_points + 1) as f64;
+            let u = 1.0 - t;
+            let x = u * u * u * from.0
+                + 3.0 * u * u * t * cp1.0
+                + 3.0 * u * t * t * cp2.0
+                + t * t * t * to.0;
+            let y = u * u * u * from.1
+                + 3.0 * u * u * t * cp1.1
+                + 3.0 * u * t * t * cp2.1
+                + t * t * t * to.1;
+            points.push((x, y));
+        }
+        points
+    }
+
+    /// Click on a target element with human-like mouse movement
     pub async fn click(
         page: &Arc<PageHandle>,
         target: &ActionTarget,
         options: &ClickOptions,
+        mouse_pos: Option<&Arc<RwLock<(f64, f64)>>>,
     ) -> Result<ActionResult, TivanaError> {
         let start = std::time::Instant::now();
         info!(?target, ?options, "Clicking");
 
-        let bounds = Self::resolve_target(page, target).await?;
-        let (x, y) = bounds.center();
+        // Scroll element into view first, then re-resolve bounds
+        Self::scroll_target_into_view(page, target).await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // Click at center of element
+        let bounds = Self::resolve_target(page, target).await?;
+        let (cx, cy) = bounds.center();
+
+        // Add small random offset to click position (±2px)
+        // Compute all random values before any .await (ThreadRng is not Send)
+        let (x, y, move_delays) = {
+            let mut rng = rand::thread_rng();
+            let x = cx + rng.gen_range(-2.0..2.0);
+            let y = cy + rng.gen_range(-2.0..2.0);
+            // Pre-generate per-point delays for mouse movement (3-5 points, 5-15ms each)
+            let num_delays = rng.gen_range(3..=5);
+            let delays: Vec<u64> = (0..num_delays).map(|_| rng.gen_range(5..=15)).collect();
+            (x, y, delays)
+        };
+
+        // Human-like mouse movement via Bezier curve
+        if let Some(pos_lock) = mouse_pos {
+            let from = { *pos_lock.read().await };
+            let points = Self::bezier_points(from, (x, y), move_delays.len());
+
+            for (point, delay) in points.iter().zip(move_delays.iter()) {
+                page.move_mouse_to(point.0, point.1).await?;
+                tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
+            }
+
+            // Update last mouse position
+            *pos_lock.write().await = (x, y);
+        }
+
+        // Click at the target
         page.click_at(x, y).await?;
 
         // Handle double-click
@@ -373,22 +489,42 @@ impl Actor {
         }
 
         let duration = start.elapsed().as_millis() as u64;
-        let page_state = Perceiver::page_state(page).await?;
 
-        Ok(ActionResult::success()
-            .with_page_state(page_state)
+        // Wait briefly for potential navigation to settle
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Page state may fail if the click caused navigation (context destroyed)
+        let page_state = Perceiver::page_state(page).await.ok();
+
+        let mut result = ActionResult::success()
             .with_data(serde_json::json!({
                 "clickedAt": { "x": x, "y": y }
             }))
-            .with_duration(duration))
+            .with_duration(duration);
+
+        if let Some(state) = page_state {
+            result = result.with_page_state(state);
+        }
+
+        Ok(result)
     }
 
-    /// Type text into a target element or currently focused element
+    /// Generate a gaussian-distributed random value using Box-Muller transform
+    fn gaussian(mean: f64, stddev: f64) -> f64 {
+        let mut rng = rand::thread_rng();
+        let u1: f64 = rng.gen_range(0.0001..1.0);
+        let u2: f64 = rng.gen_range(0.0..1.0);
+        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        (mean + stddev * z).max(10.0) // floor at 10ms
+    }
+
+    /// Type text with human-like cadence (gaussian per-character delay, occasional pauses)
     pub async fn type_text(
         page: &Arc<PageHandle>,
         text: &str,
         target: Option<&ActionTarget>,
         options: &TypeOptions,
+        mouse_pos: Option<&Arc<RwLock<(f64, f64)>>>,
     ) -> Result<ActionResult, TivanaError> {
         let start = std::time::Instant::now();
         info!(text_len = text.len(), ?target, ?options, "Typing");
@@ -396,7 +532,7 @@ impl Actor {
         // If target specified, click it first to focus
         if let Some(t) = target {
             if !t.is_empty() {
-                Self::click(page, t, &ClickOptions::default()).await?;
+                Self::click(page, t, &ClickOptions::default(), mouse_pos).await?;
                 // Small delay after click to ensure focus
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             }
@@ -408,8 +544,34 @@ impl Actor {
                 .await?;
         }
 
-        // Type the text
-        page.type_text(text).await?;
+        // Pre-compute all per-character delays (ThreadRng is not Send)
+        let char_delays: Vec<(u64, Option<u64>)> = {
+            let mut rng = rand::thread_rng();
+            let pause_interval: usize = rng.gen_range(5..=10);
+            text.chars()
+                .enumerate()
+                .map(|(i, _)| {
+                    let delay = Self::gaussian(80.0, 30.0) as u64;
+                    let pause = if i > 0 && i % pause_interval == 0 {
+                        Some(rng.gen_range(200..=400u64))
+                    } else {
+                        None
+                    };
+                    (delay, pause)
+                })
+                .collect()
+        };
+
+        // Type each character with human-like cadence
+        for (ch, (delay, pause)) in text.chars().zip(char_delays.iter()) {
+            page.type_text(&ch.to_string()).await?;
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
+
+            if let Some(p) = pause {
+                tokio::time::sleep(tokio::time::Duration::from_millis(*p)).await;
+            }
+        }
 
         let duration = start.elapsed().as_millis() as u64;
         let page_state = Perceiver::page_state(page).await?;
@@ -431,22 +593,21 @@ impl Actor {
         let start = std::time::Instant::now();
         info!(key, ?modifiers, "Pressing key");
 
-        // Build key combo string (e.g., "Control+Shift+A")
-        let key_combo = if modifiers.is_empty() {
+        page.press_key(key, modifiers).await?;
+
+        let duration = start.elapsed().as_millis() as u64;
+        let page_state = Perceiver::page_state(page).await?;
+
+        let key_desc = if modifiers.is_empty() {
             key.to_string()
         } else {
             format!("{}+{}", modifiers.join("+"), key)
         };
 
-        page.press_key(&key_combo).await?;
-
-        let duration = start.elapsed().as_millis() as u64;
-        let page_state = Perceiver::page_state(page).await?;
-
         Ok(ActionResult::success()
             .with_page_state(page_state)
             .with_data(serde_json::json!({
-                "key": key_combo
+                "key": key_desc
             }))
             .with_duration(duration))
     }
@@ -568,7 +729,7 @@ impl Actor {
             page.evaluate_void(&script).await?;
         } else if target.element_id.is_some() {
             // Click to focus element by ID
-            Self::click(page, target, &ClickOptions::default()).await?;
+            Self::click(page, target, &ClickOptions::default(), None).await?;
         } else {
             return Err(TivanaError::Browser(
                 "Focus requires selector or element_id".to_string(),

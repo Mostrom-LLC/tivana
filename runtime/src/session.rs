@@ -180,13 +180,23 @@ impl Session {
         }
     }
 
-    /// Get the default page from the browser
+    /// Get the default page from the browser, detecting crashes
     pub async fn default_page(&self) -> Result<Arc<PageHandle>, TivanaError> {
         let browser = self
             .browser
             .as_ref()
             .ok_or_else(|| TivanaError::Session("Session has no browser".to_string()))?;
-        browser.default_page().await
+
+        match browser.default_page().await {
+            Ok(page) => Ok(page),
+            Err(e) => {
+                // If browser can't provide a page, it may have crashed
+                Err(TivanaError::Browser(format!(
+                    "Browser may have crashed or disconnected: {}",
+                    e
+                )))
+            }
+        }
     }
 }
 
@@ -228,6 +238,17 @@ impl SessionRegistry {
         sessions.insert(id.clone(), session);
 
         info!(session_id = %id, "Session created");
+        id
+    }
+
+    /// Create a session with a specific ID (for reattach)
+    pub async fn create_with_id(&self, id: String, config: SessionConfig) -> String {
+        let session = Session::new(id.clone(), config);
+
+        let mut sessions = self.sessions.write().await;
+        sessions.insert(id.clone(), session);
+
+        info!(session_id = %id, "Session created (reattach)");
         id
     }
 
@@ -290,6 +311,82 @@ impl SessionRegistry {
         }
 
         session.default_page().await
+    }
+
+    /// Get the last mouse position tracker for a session's browser
+    pub async fn get_mouse_position(
+        &self,
+        id: &str,
+    ) -> Result<Arc<tokio::sync::RwLock<(f64, f64)>>, TivanaError> {
+        let sessions = self.sessions.read().await;
+        let session = sessions
+            .get(id)
+            .ok_or_else(|| TivanaError::Session(format!("Session not found: {}", id)))?;
+        let browser = session
+            .browser
+            .as_ref()
+            .ok_or_else(|| TivanaError::Session("Session has no browser".to_string()))?;
+        Ok(Arc::clone(&browser.last_mouse_position))
+    }
+
+    /// List all tabs for a session's browser
+    pub async fn list_tabs(&self, id: &str) -> Result<Vec<crate::browser::TabInfo>, TivanaError> {
+        let sessions = self.sessions.read().await;
+        let session = sessions
+            .get(id)
+            .ok_or_else(|| TivanaError::Session(format!("Session not found: {}", id)))?;
+        let browser = session
+            .browser
+            .as_ref()
+            .ok_or_else(|| TivanaError::Session("Session has no browser".to_string()))?;
+        browser.list_tabs().await
+    }
+
+    /// Switch to a tab in a session's browser
+    pub async fn switch_tab(
+        &self,
+        id: &str,
+        target_id: &str,
+    ) -> Result<Arc<PageHandle>, TivanaError> {
+        let sessions = self.sessions.read().await;
+        let session = sessions
+            .get(id)
+            .ok_or_else(|| TivanaError::Session(format!("Session not found: {}", id)))?;
+        let browser = session
+            .browser
+            .as_ref()
+            .ok_or_else(|| TivanaError::Session("Session has no browser".to_string()))?;
+        browser.switch_tab(target_id).await
+    }
+
+    /// Open a new tab in a session's browser
+    pub async fn open_tab(
+        &self,
+        id: &str,
+        url: Option<&str>,
+    ) -> Result<(Arc<PageHandle>, String), TivanaError> {
+        let sessions = self.sessions.read().await;
+        let session = sessions
+            .get(id)
+            .ok_or_else(|| TivanaError::Session(format!("Session not found: {}", id)))?;
+        let browser = session
+            .browser
+            .as_ref()
+            .ok_or_else(|| TivanaError::Session("Session has no browser".to_string()))?;
+        browser.open_tab(url).await
+    }
+
+    /// Close a tab in a session's browser
+    pub async fn close_tab(&self, id: &str, target_id: &str) -> Result<(), TivanaError> {
+        let sessions = self.sessions.read().await;
+        let session = sessions
+            .get(id)
+            .ok_or_else(|| TivanaError::Session(format!("Session not found: {}", id)))?;
+        let browser = session
+            .browser
+            .as_ref()
+            .ok_or_else(|| TivanaError::Session("Session has no browser".to_string()))?;
+        browser.close_tab(target_id).await
     }
 
     /// Execute a function with mutable access to a session

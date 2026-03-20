@@ -86,3 +86,4 @@ export type {
 } from "./types";
 
 export { ErrorCode, PROTOCOL_VERSION } from "./types";
+export type { TabInfo } from "./types";

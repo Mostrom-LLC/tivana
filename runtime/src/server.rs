@@ -4,18 +4,26 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
+
+/// How often to send WebSocket ping frames
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// If no pong is received within this duration, consider the connection stale
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
 
 use crate::act::{ActionTarget, Actor, ClickOptions, ScrollDirection, ScrollOptions, TypeOptions};
 use crate::browser::{BrowserLaunchConfig, BrowserManager};
 use crate::cli::Args;
 use crate::error::{ProtocolError, TivanaError};
 use crate::perceive::{setup_mutation_observer, stop_mutation_observer, Perceiver};
+use crate::persistence;
 use crate::protocol::{
     parse_request, serialize_outbound, EventMessage, OutboundMessage, ResponseMessage,
     PROTOCOL_VERSION,
@@ -32,6 +40,9 @@ pub struct Server {
 
     /// Browser manager
     browser_manager: BrowserManager,
+
+    /// Connect to existing Chrome instance (port or ws:// URL)
+    connect_target: Option<String>,
 
     /// Shutdown signal sender
     shutdown_tx: broadcast::Sender<()>,
@@ -58,8 +69,92 @@ impl Server {
             addr,
             sessions: SessionRegistry::new(),
             browser_manager: BrowserManager::new(browser_config),
+            connect_target: args.connect.clone(),
             shutdown_tx,
         })
+    }
+
+    /// Attempt to reattach persisted sessions (only in --connect mode)
+    async fn reattach_sessions(&self) {
+        if self.connect_target.is_none() {
+            return;
+        }
+
+        let persisted = persistence::get_active_persisted_sessions();
+        if persisted.is_empty() {
+            return;
+        }
+
+        info!(
+            count = persisted.len(),
+            "Attempting to reattach persisted sessions"
+        );
+
+        let connect_target = self.connect_target.as_ref().unwrap();
+
+        for ps in &persisted {
+            // Try to connect to Chrome and verify the targets still exist
+            match self.browser_manager.connect_existing(connect_target).await {
+                Ok(browser) => {
+                    // Check if any of the persisted targets are still alive
+                    match browser.list_tabs().await {
+                        Ok(tabs) => {
+                            let live_target_ids: Vec<String> =
+                                tabs.iter().map(|t| t.target_id.clone()).collect();
+
+                            let has_match = ps
+                                .target_ids
+                                .iter()
+                                .any(|tid| live_target_ids.contains(tid));
+
+                            if has_match {
+                                // Recreate the session with the existing browser
+                                let config = SessionConfig {
+                                    initial_url: None,
+                                    headless: ps.headless,
+                                    viewport_width: None,
+                                    viewport_height: None,
+                                };
+
+                                let session_id =
+                                    self.sessions.create_with_id(ps.session_id.clone(), config).await;
+
+                                if let Err(e) = self.sessions.start_launch(&session_id).await {
+                                    warn!(session_id = %session_id, error = %e, "Failed to start reattach launch");
+                                    persistence::mark_session_stale(&session_id);
+                                    continue;
+                                }
+
+                                if let Err(e) =
+                                    self.sessions.complete_launch(&session_id, browser).await
+                                {
+                                    warn!(session_id = %session_id, error = %e, "Failed to complete reattach");
+                                    persistence::mark_session_stale(&session_id);
+                                    continue;
+                                }
+
+                                info!(session_id = %session_id, "Session reattached successfully");
+                            } else {
+                                info!(session_id = %ps.session_id, "No matching targets found, marking stale");
+                                persistence::mark_session_stale(&ps.session_id);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to list tabs during reattach");
+                            persistence::mark_session_stale(&ps.session_id);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        session_id = %ps.session_id,
+                        error = %e,
+                        "Failed to connect to Chrome for reattach"
+                    );
+                    persistence::mark_session_stale(&ps.session_id);
+                }
+            }
+        }
     }
 
     /// Run the server
@@ -69,6 +164,9 @@ impl Server {
 
         // Wrap self in Arc for sharing across connections
         let server = Arc::new(self);
+
+        // Attempt to reattach persisted sessions in --connect mode
+        server.reattach_sessions().await;
 
         // Setup shutdown handler
         let shutdown_tx = server.shutdown_tx.clone();
@@ -104,6 +202,8 @@ impl Server {
                 _ = shutdown_rx.recv() => {
                     info!("Shutting down server");
                     server.sessions.close_all().await;
+                    // Clear persisted sessions on clean shutdown
+                    persistence::clear_all();
                     break;
                 }
             }
@@ -119,7 +219,13 @@ impl Server {
         addr: SocketAddr,
     ) -> Result<(), TivanaError> {
         let ws_stream = accept_async(stream).await?;
-        let (mut write, mut read) = ws_stream.split();
+        let (write, mut read) = ws_stream.split();
+
+        // Wrap the writer in Arc<Mutex> so heartbeat task can also send pings
+        let write = Arc::new(Mutex::new(write));
+
+        // Channel for sending outbound messages (responses + events)
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<String>(256);
 
         // Send hello event
         let hello = EventMessage::new(
@@ -130,7 +236,45 @@ impl Server {
             }),
         );
         let hello_msg = serialize_outbound(&OutboundMessage::Event(hello))?;
-        write.send(Message::Text(hello_msg)).await?;
+        write.lock().await.send(Message::Text(hello_msg)).await?;
+
+        // Track last pong received
+        let last_pong = Arc::new(Mutex::new(Instant::now()));
+
+        // Writer task: forwards outbound channel messages to WebSocket
+        let write_clone = Arc::clone(&write);
+        let writer_task = tokio::spawn(async move {
+            while let Some(msg) = outbound_rx.recv().await {
+                if write_clone.lock().await.send(Message::Text(msg)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Heartbeat task: sends pings every HEARTBEAT_INTERVAL, closes if pong is stale
+        let write_hb = Arc::clone(&write);
+        let last_pong_hb = Arc::clone(&last_pong);
+        let hb_addr = addr;
+        let heartbeat_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+            loop {
+                interval.tick().await;
+
+                // Check if last pong is too old
+                let elapsed = last_pong_hb.lock().await.elapsed();
+                if elapsed > HEARTBEAT_TIMEOUT {
+                    warn!(peer = %hb_addr, elapsed_secs = elapsed.as_secs(), "Connection stale (no pong), closing");
+                    let _ = write_hb.lock().await.send(Message::Close(None)).await;
+                    break;
+                }
+
+                // Send ping
+                if write_hb.lock().await.send(Message::Ping(vec![])).await.is_err() {
+                    break;
+                }
+                debug!(peer = %hb_addr, "Sent ping");
+            }
+        });
 
         while let Some(msg) = read.next().await {
             match msg {
@@ -138,15 +282,42 @@ impl Server {
                     debug!(peer = %addr, len = text.len(), "Received message");
                     let response = self.handle_message(&text).await;
                     let response_json = serialize_outbound(&response)?;
-                    write.send(Message::Text(response_json)).await?;
+                    if outbound_tx.send(response_json).await.is_err() {
+                        break;
+                    }
+
+                    // If this was a mutations start request, kick off event pushing
+                    if let Ok(req) = parse_request(&text) {
+                        if req.method == "perceive.mutations" {
+                            let sid = req.session_id.clone().or_else(|| {
+                                req.params
+                                    .get("sessionId")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from)
+                            });
+
+                            if let Some(session_id) = sid {
+                                let tx = outbound_tx.clone();
+                                let sessions = self.sessions.clone();
+                                tokio::spawn(async move {
+                                    Self::push_mutation_events(sessions, session_id, tx).await;
+                                });
+                            }
+                        }
+                    }
                 }
                 Ok(Message::Binary(data)) => {
                     warn!(peer = %addr, len = data.len(), "Received binary (not supported)");
                 }
                 Ok(Message::Ping(data)) => {
-                    write.send(Message::Pong(data)).await?;
+                    // Respond with pong
+                    let _ = write.lock().await.send(Message::Pong(data)).await;
                 }
-                Ok(Message::Pong(_)) => {}
+                Ok(Message::Pong(_)) => {
+                    // Update last pong timestamp
+                    *last_pong.lock().await = Instant::now();
+                    debug!(peer = %addr, "Received pong");
+                }
                 Ok(Message::Close(_)) => {
                     info!(peer = %addr, "Client disconnected");
                     break;
@@ -159,7 +330,71 @@ impl Server {
             }
         }
 
+        // Cleanup
+        heartbeat_task.abort();
+        drop(outbound_tx);
+        let _ = writer_task.await;
+
         Ok(())
+    }
+
+    /// Push mutation events from a session's observer to the WebSocket client
+    async fn push_mutation_events(
+        sessions: SessionRegistry,
+        session_id: String,
+        tx: mpsc::Sender<String>,
+    ) {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+
+        loop {
+            interval.tick().await;
+
+            let mut mutations = Vec::new();
+
+            let result = sessions
+                .with_session(&session_id, |session| {
+                    if let Some(rx) = session.mutation_rx.as_mut() {
+                        while mutations.len() < 50 {
+                            match rx.try_recv() {
+                                Ok(event) => mutations.push(event),
+                                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                    return Err(crate::error::TivanaError::Session(
+                                        "Observer disconnected".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    } else {
+                        return Err(crate::error::TivanaError::Session(
+                            "No observer".to_string(),
+                        ));
+                    }
+                    Ok(())
+                })
+                .await;
+
+            // Stop if session closed or observer gone
+            if result.is_err() {
+                debug!(session_id = %session_id, "Stopping mutation event push");
+                break;
+            }
+
+            if !mutations.is_empty() {
+                let event = EventMessage::for_session(
+                    &session_id,
+                    "page.mutation",
+                    serde_json::to_value(&mutations).unwrap_or_default(),
+                );
+                let msg = match serialize_outbound(&OutboundMessage::Event(event)) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if tx.send(msg).await.is_err() {
+                    break; // Client disconnected
+                }
+            }
+        }
     }
 
     /// Handle a single message and return response
@@ -179,6 +414,10 @@ impl Server {
             "session.create" => self.handle_session_create(&request).await,
             "session.close" => self.handle_session_close(&request).await,
             "session.list" => self.handle_session_list().await,
+            "session.tabs" => self.handle_session_tabs(&request).await,
+            "session.switchTab" => self.handle_session_switch_tab(&request).await,
+            "session.newTab" => self.handle_session_new_tab(&request).await,
+            "session.closeTab" => self.handle_session_close_tab(&request).await,
             "session.get" => self.handle_session_get(&request).await,
 
             // Browser methods
@@ -188,9 +427,12 @@ impl Server {
             // Perception methods
             "perceive.pageState" => self.handle_perceive_page_state(&request).await,
             "perceive.elements" => self.handle_perceive_elements(&request).await,
-            "perceive.accessibility" => self.handle_perceive_accessibility(&request).await,
-            "perceive.text" => self.handle_perceive_text(&request).await,
+            "perceive.accessibility" | "perceive.accessibilitySnapshot" => {
+                self.handle_perceive_accessibility(&request).await
+            }
+            "perceive.text" | "perceive.textContent" => self.handle_perceive_text(&request).await,
             "perceive.metadata" => self.handle_perceive_metadata(&request).await,
+            "perceive.findElements" => self.handle_perceive_find_elements(&request).await,
             "perceive.mutations" => self.handle_perceive_mutations(&request).await,
             "perceive.mutations.poll" => self.handle_perceive_mutations_poll(&request).await,
             "perceive.mutations.stop" => self.handle_perceive_mutations_stop(&request).await,
@@ -286,7 +528,7 @@ impl Server {
                 .params
                 .get("headless")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(true),
+                .unwrap_or(self.browser_manager.default_headless()),
             viewport_width: request
                 .params
                 .get("viewportWidth")
@@ -307,20 +549,24 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        // Build browser launch config
-        let browser_config = BrowserLaunchConfig {
-            headless: config.headless,
-            viewport_width: config.viewport_width.unwrap_or(1280),
-            viewport_height: config.viewport_height.unwrap_or(720),
-            ..Default::default()
+        // Either connect to existing Chrome or launch a new one
+        let browser = if let Some(ref target) = self.connect_target {
+            self.browser_manager
+                .connect_existing(target)
+                .await
+                .map_err(|e| ProtocolError::browser_launch_failed(e.to_string()))?
+        } else {
+            let browser_config = BrowserLaunchConfig {
+                headless: config.headless,
+                viewport_width: config.viewport_width.unwrap_or(1440),
+                viewport_height: config.viewport_height.unwrap_or(900),
+                ..Default::default()
+            };
+            self.browser_manager
+                .launch(Some(browser_config))
+                .await
+                .map_err(|e| ProtocolError::browser_launch_failed(e.to_string()))?
         };
-
-        // Launch browser
-        let browser = self
-            .browser_manager
-            .launch(Some(browser_config))
-            .await
-            .map_err(|e| ProtocolError::browser_launch_failed(e.to_string()))?;
 
         // Complete launch
         self.sessions
@@ -343,6 +589,26 @@ impl Server {
 
         let info = self.sessions.get(&session_id).await.unwrap();
 
+        // Persist session state to disk
+        let target_ids = self
+            .sessions
+            .list_tabs(&session_id)
+            .await
+            .map(|tabs| tabs.iter().map(|t| t.target_id.clone()).collect())
+            .unwrap_or_default();
+        let page_urls = self
+            .sessions
+            .list_tabs(&session_id)
+            .await
+            .map(|tabs| tabs.iter().map(|t| t.url.clone()).collect())
+            .unwrap_or_default();
+        persistence::persist_session_create(
+            &session_id,
+            config.headless,
+            target_ids,
+            page_urls,
+        );
+
         Ok(serde_json::json!({
             "sessionId": session_id,
             "state": info.state
@@ -355,6 +621,9 @@ impl Server {
     ) -> Result<serde_json::Value, ProtocolError> {
         let session_id = self.extract_session_id(request)?;
         let info = self.sessions.close(&session_id).await?;
+
+        // Remove from persistence
+        persistence::persist_session_close(&session_id);
 
         Ok(serde_json::json!({
             "sessionId": info.id,
@@ -382,6 +651,101 @@ impl Server {
             .ok_or_else(|| ProtocolError::session_not_found(&session_id))?;
 
         Ok(serde_json::to_value(info).unwrap())
+    }
+
+    // Tab management handlers
+
+    async fn handle_session_tabs(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let tabs = self
+            .sessions
+            .list_tabs(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        Ok(serde_json::json!({
+            "tabs": tabs,
+            "count": tabs.len()
+        }))
+    }
+
+    async fn handle_session_switch_tab(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let target_id = request
+            .params
+            .get("targetId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("targetId"))?;
+
+        let page = self
+            .sessions
+            .switch_tab(&session_id, target_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let url = page.url().await.unwrap_or_default();
+        let title = page.title().await.unwrap_or_default();
+
+        Ok(serde_json::json!({
+            "targetId": target_id,
+            "url": url,
+            "title": title
+        }))
+    }
+
+    async fn handle_session_new_tab(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let url = request.params.get("url").and_then(|v| v.as_str());
+
+        let (page, target_id) = self
+            .sessions
+            .open_tab(&session_id, url)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let final_url = page.url().await.unwrap_or_default();
+        let title = page.title().await.unwrap_or_default();
+
+        Ok(serde_json::json!({
+            "targetId": target_id,
+            "url": final_url,
+            "title": title
+        }))
+    }
+
+    async fn handle_session_close_tab(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let target_id = request
+            .params
+            .get("targetId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("targetId"))?;
+
+        self.sessions
+            .close_tab(&session_id, target_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        Ok(serde_json::json!({
+            "closed": true,
+            "targetId": target_id
+        }))
     }
 
     // Browser handlers
@@ -470,10 +834,8 @@ impl Server {
             ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
         })?;
 
-        Ok(serde_json::json!({
-            "elements": elements,
-            "count": elements.len()
-        }))
+        // Return array directly to match SDK expectation
+        Ok(serde_json::to_value(&elements).unwrap_or_default())
     }
 
     async fn handle_perceive_accessibility(
@@ -533,6 +895,33 @@ impl Server {
         })?;
 
         Ok(serde_json::to_value(&metadata).unwrap_or_default())
+    }
+
+    async fn handle_perceive_find_elements(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let selector = request
+            .params
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("selector"))?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let elements = Perceiver::find_elements(&page, selector)
+            .await
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
+            })?;
+
+        Ok(serde_json::to_value(&elements).unwrap_or_default())
     }
 
     async fn handle_perceive_mutations(
@@ -688,9 +1077,17 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let result = Actor::click(&page, &target, &options).await.map_err(|e| {
-            ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
-        })?;
+        let mouse_pos = self
+            .sessions
+            .get_mouse_position(&session_id)
+            .await
+            .ok();
+
+        let result = Actor::click(&page, &target, &options, mouse_pos.as_ref())
+            .await
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
+            })?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }
@@ -721,7 +1118,13 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        let result = Actor::type_text(&page, text, target.as_ref(), &options)
+        let mouse_pos = self
+            .sessions
+            .get_mouse_position(&session_id)
+            .await
+            .ok();
+
+        let result = Actor::type_text(&page, text, target.as_ref(), &options, mouse_pos.as_ref())
             .await
             .map_err(|e| {
                 ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
@@ -927,6 +1330,7 @@ mod tests {
             headed: true,
             chrome_path: None,
             host: "127.0.0.1".to_string(),
+            connect: None,
         };
         let server = Server::new(args).unwrap();
         assert_eq!(server.addr.port(), 9876);

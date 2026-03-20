@@ -16,12 +16,13 @@
     "dist"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node && tsc --emitDeclarationOnly",
+    "build": "bun build src/index.ts --outdir dist --target node --format cjs && cp dist/index.js dist/index.cjs && bun build src/index.ts --outdir dist --target node --format esm && mv dist/index.js dist/index.mjs && mv dist/index.cjs dist/index.js && tsc --emitDeclarationOnly",
     "dev": "bun --watch src/index.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "smoke-test": "bun run smoke-test.ts",
-    "example": "bun run examples/smoke-test.ts"
+    "example": "bun run examples/smoke-test.ts",
+    "prepublishOnly": "npm run build && npm run typecheck"
   },
   "keywords": [
     "browser",

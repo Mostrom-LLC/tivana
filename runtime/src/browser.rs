@@ -42,8 +42,8 @@ impl Default for BrowserLaunchConfig {
         Self {
             headless: true,
             chrome_path: None,
-            viewport_width: 1280,
-            viewport_height: 720,
+            viewport_width: 1440,
+            viewport_height: 900,
             user_data_dir: None,
             args: vec![],
         }
@@ -148,90 +148,202 @@ impl PageHandle {
         Ok(())
     }
 
-    /// Click at specific coordinates using JavaScript
-    pub async fn click_at(&self, x: f64, y: f64) -> Result<(), TivanaError> {
-        // Use JavaScript to dispatch click events at coordinates
-        let script = format!(
-            r#"(() => {{
-                const el = document.elementFromPoint({}, {});
-                if (el) {{
-                    const events = ['mousedown', 'mouseup', 'click'];
-                    for (const eventType of events) {{
-                        const event = new MouseEvent(eventType, {{
-                            view: window,
-                            bubbles: true,
-                            cancelable: true,
-                            clientX: {},
-                            clientY: {}
-                        }});
-                        el.dispatchEvent(event);
-                    }}
-                }}
-            }})()"#,
-            x, y, x, y
-        );
-        self.evaluate_void(&script).await
-    }
+    /// Dispatch a mouseMoved CDP event to the given coordinates
+    pub async fn move_mouse_to(&self, x: f64, y: f64) -> Result<(), TivanaError> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchMouseEventParams, DispatchMouseEventType,
+        };
 
-    /// Type text by directly manipulating the active element
-    pub async fn type_text(&self, text: &str) -> Result<(), TivanaError> {
-        // Type by setting value or insertText depending on element type
-        let script = format!(
-            r#"(() => {{
-                const text = {};
-                const el = document.activeElement;
-                if (!el) return false;
+        let moved = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseMoved)
+            .x(x)
+            .y(y)
+            .build()
+            .map_err(|e| TivanaError::Browser(format!("Failed to build mouse event: {}", e)))?;
 
-                if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{
-                    // For form elements, set value and trigger events
-                    const start = el.selectionStart || 0;
-                    const end = el.selectionEnd || 0;
-                    const before = el.value.substring(0, start);
-                    const after = el.value.substring(end);
-                    el.value = before + text + after;
-                    el.selectionStart = el.selectionEnd = start + text.length;
-                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    return true;
-                }} else if (el.isContentEditable) {{
-                    // For contenteditable, use execCommand
-                    document.execCommand('insertText', false, text);
-                    return true;
-                }}
-                return false;
-            }})()"#,
-            serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
-        );
+        self.page
+            .execute(moved)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("CDP mouseMoved failed: {}", e)))?;
 
-        let success: bool = self.evaluate(&script).await?;
-        if !success {
-            return Err(TivanaError::Browser(
-                "No active element to type into".to_string(),
-            ));
-        }
         Ok(())
     }
 
-    /// Press a key using JavaScript keyboard events
-    pub async fn press_key(&self, key: &str) -> Result<(), TivanaError> {
-        // Dispatch keyboard event via JavaScript
-        let script = format!(
-            r#"(() => {{
-                const key = {};
-                const events = ['keydown', 'keypress', 'keyup'];
-                for (const eventType of events) {{
-                    const event = new KeyboardEvent(eventType, {{
-                        key: key,
-                        code: key,
-                        bubbles: true,
-                        cancelable: true
-                    }});
-                    document.activeElement?.dispatchEvent(event) || document.dispatchEvent(event);
-                }}
-            }})()"#,
-            serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string())
-        );
-        self.evaluate_void(&script).await
+    /// Click at specific coordinates using CDP Input.dispatchMouseEvent
+    /// Includes a random human-like delay between mousedown and mouseup (50-150ms)
+    pub async fn click_at(&self, x: f64, y: f64) -> Result<(), TivanaError> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+        };
+        use rand::Rng;
+
+        // Mouse pressed
+        let pressed = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MousePressed)
+            .x(x)
+            .y(y)
+            .button(MouseButton::Left)
+            .click_count(1)
+            .build()
+            .map_err(|e| TivanaError::Browser(format!("Failed to build mouse event: {}", e)))?;
+
+        self.page
+            .execute(pressed)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("CDP mousePressed failed: {}", e)))?;
+
+        // Human-like delay between mousedown and mouseup (50-150ms gaussian)
+        let delay_ms = {
+            let mut rng = rand::thread_rng();
+            let base: f64 = rng.gen_range(50.0..150.0);
+            base as u64
+        };
+        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+
+        // Mouse released
+        let released = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseReleased)
+            .x(x)
+            .y(y)
+            .button(MouseButton::Left)
+            .click_count(1)
+            .build()
+            .map_err(|e| TivanaError::Browser(format!("Failed to build mouse event: {}", e)))?;
+
+        self.page
+            .execute(released)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("CDP mouseReleased failed: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Type text using CDP Input.dispatchKeyEvent for each character
+    ///
+    /// Uses KeyDown (without text) + Char (with text) + KeyUp pattern.
+    /// The Char event is what actually inserts the character; KeyDown/KeyUp
+    /// handle modifier state and key identification only.
+    pub async fn type_text(&self, text: &str) -> Result<(), TivanaError> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchKeyEventParams, DispatchKeyEventType,
+        };
+
+        for ch in text.chars() {
+            let text_str = ch.to_string();
+
+            // keyDown without text (just signals the key press, does not insert)
+            let key_down = DispatchKeyEventParams::builder()
+                .r#type(DispatchKeyEventType::RawKeyDown)
+                .key(text_str.clone())
+                .build()
+                .map_err(|e| TivanaError::Browser(format!("Failed to build key event: {}", e)))?;
+
+            self.page
+                .execute(key_down)
+                .await
+                .map_err(|e| TivanaError::Browser(format!("CDP keyDown failed: {}", e)))?;
+
+            // char event — this is what inserts the character
+            let char_event = DispatchKeyEventParams::builder()
+                .r#type(DispatchKeyEventType::Char)
+                .text(text_str.clone())
+                .build()
+                .map_err(|e| TivanaError::Browser(format!("Failed to build key event: {}", e)))?;
+
+            self.page
+                .execute(char_event)
+                .await
+                .map_err(|e| TivanaError::Browser(format!("CDP char failed: {}", e)))?;
+
+            // keyUp
+            let key_up = DispatchKeyEventParams::builder()
+                .r#type(DispatchKeyEventType::KeyUp)
+                .key(text_str)
+                .build()
+                .map_err(|e| TivanaError::Browser(format!("Failed to build key event: {}", e)))?;
+
+            self.page
+                .execute(key_up)
+                .await
+                .map_err(|e| TivanaError::Browser(format!("CDP keyUp failed: {}", e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Press a key using CDP Input.dispatchKeyEvent with proper modifier support
+    pub async fn press_key(&self, key: &str, modifiers: &[String]) -> Result<(), TivanaError> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchKeyEventParams, DispatchKeyEventType,
+        };
+
+        // Calculate modifier bitmask: Alt=1, Ctrl=2, Meta=4, Shift=8
+        let modifier_flags: i64 = modifiers
+            .iter()
+            .map(|m| match m.to_lowercase().as_str() {
+                "alt" => 1,
+                "control" | "ctrl" => 2,
+                "meta" | "command" | "cmd" => 4,
+                "shift" => 8,
+                _ => 0,
+            })
+            .sum();
+
+        // Press modifier keys down
+        for modifier in modifiers {
+            let cmd = DispatchKeyEventParams::builder()
+                .r#type(DispatchKeyEventType::RawKeyDown)
+                .key(modifier.clone())
+                .modifiers(modifier_flags)
+                .build()
+                .map_err(|e| TivanaError::Browser(format!("Failed to build key event: {}", e)))?;
+
+            self.page
+                .execute(cmd)
+                .await
+                .map_err(|e| TivanaError::Browser(format!("CDP modifier keyDown failed: {}", e)))?;
+        }
+
+        // Press the main key
+        let key_down = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::RawKeyDown)
+            .key(key)
+            .modifiers(modifier_flags)
+            .build()
+            .map_err(|e| TivanaError::Browser(format!("Failed to build key event: {}", e)))?;
+
+        self.page
+            .execute(key_down)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("CDP keyDown failed: {}", e)))?;
+
+        let key_up = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyUp)
+            .key(key)
+            .modifiers(modifier_flags)
+            .build()
+            .map_err(|e| TivanaError::Browser(format!("Failed to build key event: {}", e)))?;
+
+        self.page
+            .execute(key_up)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("CDP keyUp failed: {}", e)))?;
+
+        // Release modifier keys
+        for modifier in modifiers.iter().rev() {
+            let cmd = DispatchKeyEventParams::builder()
+                .r#type(DispatchKeyEventType::KeyUp)
+                .key(modifier.clone())
+                .build()
+                .map_err(|e| TivanaError::Browser(format!("Failed to build key event: {}", e)))?;
+
+            self.page
+                .execute(cmd)
+                .await
+                .map_err(|e| TivanaError::Browser(format!("CDP modifier keyUp failed: {}", e)))?;
+        }
+
+        Ok(())
     }
 
     /// Close the page
@@ -258,6 +370,12 @@ pub struct BrowserHandle {
 
     /// Browser handler task
     handler_task: Option<tokio::task::JoinHandle<()>>,
+
+    /// Whether this browser was connected to externally (don't kill on close)
+    pub is_external: bool,
+
+    /// Last known mouse position for human-like movement interpolation
+    pub last_mouse_position: Arc<RwLock<(f64, f64)>>,
 }
 
 impl BrowserHandle {
@@ -272,6 +390,24 @@ impl BrowserHandle {
             browser: Arc::new(RwLock::new(Some(browser))),
             pages: Arc::new(RwLock::new(Vec::new())),
             handler_task: Some(handler),
+            is_external: false,
+            last_mouse_position: Arc::new(RwLock::new((0.0, 0.0))),
+        }
+    }
+
+    /// Create a new browser handle for an externally-connected browser
+    pub fn new_external(
+        config: BrowserLaunchConfig,
+        browser: Browser,
+        handler: tokio::task::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            config,
+            browser: Arc::new(RwLock::new(Some(browser))),
+            pages: Arc::new(RwLock::new(Vec::new())),
+            handler_task: Some(handler),
+            is_external: true,
+            last_mouse_position: Arc::new(RwLock::new((0.0, 0.0))),
         }
     }
 
@@ -321,17 +457,138 @@ impl BrowserHandle {
         Ok(())
     }
 
-    /// Close the browser and all pages
-    pub async fn close(self) -> Result<(), TivanaError> {
-        info!("Closing browser");
+    /// List all open tabs/pages in the browser via CDP
+    pub async fn list_tabs(&self) -> Result<Vec<TabInfo>, TivanaError> {
+        use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
 
-        // Clear pages
+        let browser_guard = self.browser.read().await;
+        let browser = browser_guard
+            .as_ref()
+            .ok_or_else(|| TivanaError::Browser("Browser is closed".to_string()))?;
+
+        let resp = browser
+            .execute(GetTargetsParams::builder().build())
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to get targets: {}", e)))?;
+
+        let pages = self.pages.read().await;
+        let active_page_id = pages.first().map(|p| p.id.clone());
+
+        let mut tabs = Vec::new();
+        for target in resp.target_infos.iter() {
+            if target.r#type == "page" {
+                let is_active = pages.iter().any(|p| {
+                    // Match by checking if this is our tracked page
+                    // The first page in our list is the "active" one
+                    p.id == active_page_id.as_deref().unwrap_or("")
+                });
+
+                tabs.push(TabInfo {
+                    target_id: target.target_id.inner().clone(),
+                    url: target.url.clone(),
+                    title: target.title.clone(),
+                    active: is_active && tabs.is_empty(), // First match is active
+                });
+            }
+        }
+
+        Ok(tabs)
+    }
+
+    /// Switch to a different tab by target ID
+    pub async fn switch_tab(&self, target_id: &str) -> Result<Arc<PageHandle>, TivanaError> {
+        use chromiumoxide::cdp::browser_protocol::target::{ActivateTargetParams, TargetId};
+
+        let browser_guard = self.browser.read().await;
+        let browser = browser_guard
+            .as_ref()
+            .ok_or_else(|| TivanaError::Browser("Browser is closed".to_string()))?;
+
+        let tid: TargetId = TargetId::from(target_id.to_string());
+
+        // Activate the target (brings it to front)
+        browser
+            .execute(ActivateTargetParams::new(tid.clone()))
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to activate target: {}", e)))?;
+
+        // Get the page for this target
+        let page = browser
+            .get_page(tid)
+            .await
+            .map_err(|e| {
+                TivanaError::Browser(format!("Target {} not found as page: {}", target_id, e))
+            })?;
+
+        let handle = Arc::new(PageHandle::new(page));
+
+        // Put this page at the front of our pages list (making it the "active" page)
+        let mut pages = self.pages.write().await;
+        pages.insert(0, Arc::clone(&handle));
+
+        info!(target_id = %target_id, "Switched to tab");
+        Ok(handle)
+    }
+
+    /// Open a new tab with optional URL
+    pub async fn open_tab(&self, url: Option<&str>) -> Result<(Arc<PageHandle>, String), TivanaError> {
+        let browser_guard = self.browser.read().await;
+        let browser = browser_guard
+            .as_ref()
+            .ok_or_else(|| TivanaError::Browser("Browser is closed".to_string()))?;
+
+        let target_url = url.unwrap_or("about:blank");
+        let page = browser
+            .new_page(target_url)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to create tab: {}", e)))?;
+
+        // Get the target ID for this page
+        let target_id = page.target_id().inner().clone();
+        let handle = Arc::new(PageHandle::new(page));
+
+        // Make it the active page (insert at front)
+        let mut pages = self.pages.write().await;
+        pages.insert(0, Arc::clone(&handle));
+
+        info!(target_id = %target_id, url = %target_url, "Opened new tab");
+        Ok((handle, target_id))
+    }
+
+    /// Close a tab by target ID
+    pub async fn close_tab(&self, target_id: &str) -> Result<(), TivanaError> {
+        use chromiumoxide::cdp::browser_protocol::target::{CloseTargetParams, TargetId};
+
+        let browser_guard = self.browser.read().await;
+        let browser = browser_guard
+            .as_ref()
+            .ok_or_else(|| TivanaError::Browser("Browser is closed".to_string()))?;
+
+        let tid: TargetId = TargetId::from(target_id.to_string());
+        browser
+            .execute(CloseTargetParams::new(tid))
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to close target: {}", e)))?;
+
+        info!(target_id = %target_id, "Closed tab");
+        Ok(())
+    }
+
+    /// Close the browser and all pages.
+    /// For external browsers (--connect mode), only disconnects without killing Chrome.
+    pub async fn close(self) -> Result<(), TivanaError> {
+        if self.is_external {
+            info!("Disconnecting from external browser (Chrome will keep running)");
+        } else {
+            info!("Closing browser");
+        }
+
+        // Clear our page handles
         self.pages.write().await.clear();
 
-        // Take ownership of browser and close it
+        // Take ownership of browser and drop it (closes CDP connection)
         let mut browser_guard = self.browser.write().await;
         if let Some(browser) = browser_guard.take() {
-            // Browser will be dropped, which closes the connection
             drop(browser);
         }
 
@@ -342,6 +599,23 @@ impl BrowserHandle {
 
         Ok(())
     }
+}
+
+/// Information about a browser tab
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabInfo {
+    /// CDP target ID
+    pub target_id: String,
+
+    /// Current URL
+    pub url: String,
+
+    /// Page title
+    pub title: String,
+
+    /// Whether this is the currently active tab in Tivana
+    pub active: bool,
 }
 
 /// Result of a navigation action
@@ -371,6 +645,11 @@ impl BrowserManager {
         Self {
             default_config: config,
         }
+    }
+
+    /// Get the default headless setting from server config
+    pub fn default_headless(&self) -> bool {
+        self.default_config.headless
     }
 
     /// Launch a new browser instance
@@ -418,6 +697,17 @@ impl BrowserManager {
             .arg("--disable-sync")
             .arg("--disable-translate");
 
+        // Anti-bot-detection: remove automation fingerprints
+        builder = builder
+            .arg("--disable-blink-features=AutomationControlled")
+            .arg("--disable-features=AutomationControlled")
+            .arg("--disable-infobars");
+
+        // Use realistic user agent
+        builder = builder.arg(
+            "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        );
+
         // Add custom args
         for arg in &config.args {
             builder = builder.arg(arg);
@@ -444,7 +734,71 @@ impl BrowserManager {
         // Create initial page
         handle.new_page().await?;
 
+        // Inject stealth patches to defeat bot detection
+        inject_stealth_scripts(&handle).await;
+
         info!("Browser launched successfully");
+        Ok(handle)
+    }
+
+    /// Connect to an existing Chrome instance via debugging port or WebSocket URL
+    pub async fn connect_existing(
+        &self,
+        target: &str,
+    ) -> Result<BrowserHandle, TivanaError> {
+        // Determine the WebSocket URL
+        let ws_url = if target.starts_with("ws://") || target.starts_with("wss://") {
+            target.to_string()
+        } else {
+            // Treat as a port number — discover the WebSocket URL
+            let port = target
+                .parse::<u16>()
+                .map_err(|_| TivanaError::Browser(format!("Invalid connect target: {}. Use a port number or ws:// URL", target)))?;
+
+            // Query Chrome's /json/version endpoint to get the WebSocket debugger URL
+            let version_url = format!("http://127.0.0.1:{}/json/version", port);
+            info!(url = %version_url, "Discovering Chrome WebSocket URL");
+
+            let resp = reqwest::get(&version_url)
+                .await
+                .map_err(|e| TivanaError::Browser(format!(
+                    "Failed to connect to Chrome on port {}. Is Chrome running with --remote-debugging-port={}? Error: {}",
+                    port, port, e
+                )))?;
+
+            let version_info: serde_json::Value = resp.json().await.map_err(|e| {
+                TivanaError::Browser(format!("Failed to parse Chrome version info: {}", e))
+            })?;
+
+            version_info["webSocketDebuggerUrl"]
+                .as_str()
+                .ok_or_else(|| TivanaError::Browser("Chrome did not provide webSocketDebuggerUrl".to_string()))?
+                .to_string()
+        };
+
+        info!(ws_url = %ws_url, "Connecting to existing Chrome instance");
+
+        let (browser, mut handler) = Browser::connect(&ws_url)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to connect to Chrome: {}", e)))?;
+
+        // Spawn handler task
+        let handler_task = tokio::spawn(async move {
+            while let Some(event) = handler.next().await {
+                debug!(?event, "Browser event");
+            }
+        });
+
+        let config = self.default_config.clone();
+        let handle = BrowserHandle::new_external(config, browser, handler_task);
+
+        // Open a new tab (don't touch existing tabs)
+        handle.new_page().await?;
+
+        // Inject stealth patches to defeat bot detection
+        inject_stealth_scripts(&handle).await;
+
+        info!("Connected to existing Chrome instance successfully");
         Ok(handle)
     }
 }
@@ -453,6 +807,322 @@ impl Default for BrowserManager {
     fn default() -> Self {
         Self::new(BrowserLaunchConfig::default())
     }
+}
+
+/// Inject comprehensive stealth scripts into a browser handle to defeat bot detection.
+/// This is called automatically on every browser launch and connect — zero config.
+async fn inject_stealth_scripts(handle: &BrowserHandle) {
+    if let Ok(page) = handle.default_page().await {
+        let stealth_script = get_stealth_script();
+
+        use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
+        let cmd = AddScriptToEvaluateOnNewDocumentParams::new(&stealth_script);
+        let _ = page.inner().execute(cmd).await;
+
+        // Also run immediately on current page
+        let _ = page.evaluate_void(&stealth_script).await;
+    }
+}
+
+/// Returns the full stealth JavaScript payload.
+/// Every Tivana session gets this — no flags, no config.
+fn get_stealth_script() -> String {
+    r#"
+// === navigator.webdriver ===
+// Delete the property entirely, then redefine as undefined
+delete Object.getPrototypeOf(navigator).webdriver;
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined,
+    configurable: true,
+});
+
+// === chrome.runtime ===
+if (!window.chrome) { window.chrome = {}; }
+if (!window.chrome.runtime) {
+    window.chrome.runtime = {
+        connect: function() {},
+        sendMessage: function() {},
+        id: undefined,
+    };
+}
+// chrome.app for iframe contentWindow checks
+if (!window.chrome.app) {
+    window.chrome.app = {
+        isInstalled: false,
+        InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+        RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+        getDetails: function() { return null; },
+        getIsInstalled: function() { return false; },
+    };
+}
+
+// === Permissions API ===
+const _origPermQuery = navigator.permissions.query.bind(navigator.permissions);
+Object.defineProperty(navigator.permissions, 'query', {
+    value: (params) => {
+        if (params.name === 'notifications') {
+            return Promise.resolve({ state: 'prompt', onchange: null });
+        }
+        return _origPermQuery(params);
+    },
+    writable: true,
+    configurable: true,
+});
+
+// === Navigator properties ===
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['en-US', 'en'],
+    configurable: true,
+});
+Object.defineProperty(navigator, 'hardwareConcurrency', {
+    get: () => 8,
+    configurable: true,
+});
+Object.defineProperty(navigator, 'deviceMemory', {
+    get: () => 8,
+    configurable: true,
+});
+Object.defineProperty(navigator, 'maxTouchPoints', {
+    get: () => 0,
+    configurable: true,
+});
+// Desktop Chrome removed navigator.getBattery
+if (navigator.getBattery) {
+    Object.defineProperty(navigator, 'getBattery', {
+        get: () => undefined,
+        configurable: true,
+    });
+}
+// navigator.connection (NetworkInformation API)
+Object.defineProperty(navigator, 'connection', {
+    get: () => ({
+        effectiveType: '4g',
+        rtt: 50,
+        downlink: 10,
+        saveData: false,
+        onchange: null,
+    }),
+    configurable: true,
+});
+
+// === Plugins & MimeTypes with proper prototype chain ===
+(function() {
+    const pluginData = [
+        { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chromium PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: '' },
+        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+    ];
+
+    const mimeTypes = [
+        { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+        { type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+    ];
+
+    // Build fake PluginArray
+    const fakePlugins = Object.create(PluginArray.prototype);
+    pluginData.forEach((p, i) => {
+        const plugin = Object.create(Plugin.prototype);
+        Object.defineProperties(plugin, {
+            name: { value: p.name, enumerable: true },
+            filename: { value: p.filename, enumerable: true },
+            description: { value: p.description, enumerable: true },
+            length: { value: mimeTypes.length, enumerable: true },
+        });
+        // Index access
+        mimeTypes.forEach((m, j) => {
+            const mt = Object.create(MimeType.prototype);
+            Object.defineProperties(mt, {
+                type: { value: m.type, enumerable: true },
+                suffixes: { value: m.suffixes, enumerable: true },
+                description: { value: m.description, enumerable: true },
+                enabledPlugin: { value: plugin, enumerable: true },
+            });
+            Object.defineProperty(plugin, j, { value: mt, enumerable: false });
+            Object.defineProperty(plugin, m.type, { value: mt, enumerable: false });
+        });
+        Object.defineProperty(fakePlugins, i, { value: plugin, enumerable: true });
+        Object.defineProperty(fakePlugins, p.name, { value: plugin, enumerable: false });
+    });
+    Object.defineProperty(fakePlugins, 'length', { value: pluginData.length, enumerable: true });
+    fakePlugins.item = function(i) { return this[i] || null; };
+    fakePlugins.namedItem = function(n) { return this[n] || null; };
+    fakePlugins.refresh = function() {};
+
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => fakePlugins,
+        configurable: true,
+    });
+
+    // Build fake MimeTypeArray
+    const fakeMimes = Object.create(MimeTypeArray.prototype);
+    mimeTypes.forEach((m, i) => {
+        const mt = Object.create(MimeType.prototype);
+        Object.defineProperties(mt, {
+            type: { value: m.type, enumerable: true },
+            suffixes: { value: m.suffixes, enumerable: true },
+            description: { value: m.description, enumerable: true },
+            enabledPlugin: { value: fakePlugins[0], enumerable: true },
+        });
+        Object.defineProperty(fakeMimes, i, { value: mt, enumerable: true });
+        Object.defineProperty(fakeMimes, m.type, { value: mt, enumerable: false });
+    });
+    Object.defineProperty(fakeMimes, 'length', { value: mimeTypes.length, enumerable: true });
+    fakeMimes.item = function(i) { return this[i] || null; };
+    fakeMimes.namedItem = function(n) { return this[n] || null; };
+
+    Object.defineProperty(navigator, 'mimeTypes', {
+        get: () => fakeMimes,
+        configurable: true,
+    });
+})();
+
+// === WebGL fingerprint ===
+(function() {
+    const getParamOrig = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(param) {
+        // UNMASKED_VENDOR_WEBGL
+        if (param === 0x9245) return 'Google Inc. (Apple)';
+        // UNMASKED_RENDERER_WEBGL
+        if (param === 0x9246) return 'ANGLE (Apple, Apple M1, OpenGL 4.1)';
+        return getParamOrig.call(this, param);
+    };
+    // Also patch WebGL2 if available
+    if (typeof WebGL2RenderingContext !== 'undefined') {
+        const getParam2Orig = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = function(param) {
+            if (param === 0x9245) return 'Google Inc. (Apple)';
+            if (param === 0x9246) return 'ANGLE (Apple, Apple M1, OpenGL 4.1)';
+            return getParam2Orig.call(this, param);
+        };
+    }
+})();
+
+// === Canvas fingerprint noise ===
+(function() {
+    // Unique per-session seed for consistent-but-unique noise
+    const seed = Math.floor(Math.random() * 0xFFFFFFFF);
+    function mulberry32(a) {
+        return function() {
+            a |= 0; a = a + 0x6D2B79F5 | 0;
+            let t = Math.imul(a ^ a >>> 15, 1 | a);
+            t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+            return ((t ^ t >>> 14) >>> 0) / 4294967296;
+        };
+    }
+    const rng = mulberry32(seed);
+
+    // Patch toDataURL to add subtle noise
+    const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function() {
+        try {
+            const ctx = this.getContext('2d');
+            if (ctx && this.width > 0 && this.height > 0) {
+                const imageData = ctx.getImageData(0, 0, Math.min(this.width, 16), Math.min(this.height, 16));
+                // Flip 1-2 bits in a few random pixels
+                for (let i = 0; i < 4; i++) {
+                    const idx = Math.floor(rng() * imageData.data.length);
+                    imageData.data[idx] = imageData.data[idx] ^ 1;
+                }
+                ctx.putImageData(imageData, 0, 0);
+            }
+        } catch(e) { /* cross-origin or WebGL canvas, skip */ }
+        return origToDataURL.apply(this, arguments);
+    };
+
+    // Patch toBlob similarly
+    const origToBlob = HTMLCanvasElement.prototype.toBlob;
+    HTMLCanvasElement.prototype.toBlob = function() {
+        try {
+            const ctx = this.getContext('2d');
+            if (ctx && this.width > 0 && this.height > 0) {
+                const imageData = ctx.getImageData(0, 0, Math.min(this.width, 16), Math.min(this.height, 16));
+                for (let i = 0; i < 4; i++) {
+                    const idx = Math.floor(rng() * imageData.data.length);
+                    imageData.data[idx] = imageData.data[idx] ^ 1;
+                }
+                ctx.putImageData(imageData, 0, 0);
+            }
+        } catch(e) {}
+        return origToBlob.apply(this, arguments);
+    };
+
+    // Patch getImageData to add 1-bit noise to random pixels
+    const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function() {
+        const imageData = origGetImageData.apply(this, arguments);
+        // Flip the LSB of 2-4 random pixel components
+        const numFlips = 2 + Math.floor(rng() * 3);
+        for (let i = 0; i < numFlips; i++) {
+            const idx = Math.floor(rng() * imageData.data.length);
+            imageData.data[idx] = imageData.data[idx] ^ 1;
+        }
+        return imageData;
+    };
+})();
+
+// === AudioContext fingerprint noise ===
+(function() {
+    // Add tiny frequency variations to oscillators
+    if (typeof OscillatorNode !== 'undefined') {
+        const origSetValue = Object.getOwnPropertyDescriptor(AudioParam.prototype, 'value');
+        if (origSetValue && origSetValue.set) {
+            const origSetter = origSetValue.set;
+            Object.defineProperty(AudioParam.prototype, 'value', {
+                get: origSetValue.get,
+                set: function(val) {
+                    // Add ±0.001% noise to frequency values
+                    if (typeof val === 'number' && val > 0) {
+                        val = val * (1 + (Math.random() - 0.5) * 0.00002);
+                    }
+                    origSetter.call(this, val);
+                },
+                configurable: true,
+                enumerable: true,
+            });
+        }
+    }
+
+    // Patch OfflineAudioContext.startRendering to add subtle noise to output
+    if (typeof OfflineAudioContext !== 'undefined') {
+        const origStartRendering = OfflineAudioContext.prototype.startRendering;
+        OfflineAudioContext.prototype.startRendering = function() {
+            return origStartRendering.apply(this, arguments).then(function(buffer) {
+                // Add tiny noise to the first channel
+                try {
+                    const data = buffer.getChannelData(0);
+                    for (let i = 0; i < Math.min(data.length, 100); i++) {
+                        data[i] += (Math.random() - 0.5) * 0.0000001;
+                    }
+                } catch(e) {}
+                return buffer;
+            });
+        };
+    }
+})();
+
+// === iframe contentWindow protection ===
+// Ensure iframes don't leak automation signals through contentWindow
+(function() {
+    const origContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+    if (origContentWindow && origContentWindow.get) {
+        Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+            get: function() {
+                const win = origContentWindow.get.call(this);
+                // For same-origin iframes, ensure chrome object is consistent
+                try {
+                    if (win && win.chrome === undefined) {
+                        win.chrome = window.chrome;
+                    }
+                } catch(e) { /* cross-origin, expected */ }
+                return win;
+            },
+            configurable: true,
+        });
+    }
+})();
+"#.to_string()
 }
 
 /// Viewport dimensions
@@ -479,7 +1149,7 @@ mod tests {
     fn test_browser_config_default() {
         let config = BrowserLaunchConfig::default();
         assert!(config.headless);
-        assert_eq!(config.viewport_width, 1280);
-        assert_eq!(config.viewport_height, 720);
+        assert_eq!(config.viewport_width, 1440);
+        assert_eq!(config.viewport_height, 900);
     }
 }

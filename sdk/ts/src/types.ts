@@ -109,6 +109,22 @@ export interface SessionInfo {
 }
 
 //=============================================================================
+// Tab Types
+//=============================================================================
+
+/** Information about a browser tab */
+export interface TabInfo {
+  /** CDP target ID */
+  targetId: string;
+  /** Current URL */
+  url: string;
+  /** Page title */
+  title: string;
+  /** Whether this is the currently active tab */
+  active: boolean;
+}
+
+//=============================================================================
 // Page State Types
 //=============================================================================
 
@@ -469,9 +485,15 @@ export interface ClientOptions {
   /** Request timeout in ms (default: 30000) */
   timeout?: number;
 
-  /** Auto-reconnect on disconnect */
+  /** Auto-reconnect on disconnect with exponential backoff */
   autoReconnect?: boolean;
 
-  /** Reconnect delay in ms (default: 1000) */
+  /** Initial reconnect delay in ms (default: 1000, doubles up to maxReconnectDelay) */
   reconnectDelay?: number;
+
+  /** Maximum reconnect delay in ms (default: 30000) */
+  maxReconnectDelay?: number;
+
+  /** Callback invoked when reconnection succeeds */
+  onReconnect?: () => void;
 }

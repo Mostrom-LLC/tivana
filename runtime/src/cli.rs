@@ -27,6 +27,11 @@ pub struct Args {
     /// Host to bind the WebSocket server to
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
+
+    /// Connect to an existing Chrome instance instead of launching a new one.
+    /// Provide the debugging port (e.g., --connect 9222) or full WebSocket URL.
+    #[arg(long)]
+    pub connect: Option<String>,
 }
 
 impl Args {

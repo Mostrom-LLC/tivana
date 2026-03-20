@@ -26,6 +26,7 @@ import type {
   TextContent,
   PageMetadata,
   ElementInfo,
+  TabInfo,
 } from "./types";
 import { PROTOCOL_VERSION } from "./types";
 
@@ -35,6 +36,8 @@ const DEFAULT_OPTIONS: Required<ClientOptions> = {
   timeout: 30000,
   autoReconnect: false,
   reconnectDelay: 1000,
+  maxReconnectDelay: 30000,
+  onReconnect: () => {},
 };
 
 /** Pending request */
@@ -43,6 +46,14 @@ interface PendingRequest {
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
+
+/**
+ * Tivana Client
+ *
+ * Connects to the Tivana runtime and provides methods for browser perception and actions.
+ */
+/** Reconnect state */
+type ReconnectState = "idle" | "reconnecting" | "connected";
 
 /**
  * Tivana Client
@@ -59,8 +70,36 @@ export class TivanaClient {
   private connected = false;
   private nodeWs: typeof import("ws") | null = null;
 
+  /** Reconnect state */
+  private reconnectState: ReconnectState = "idle";
+  private currentReconnectDelay = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private commandQueue: Array<{ method: string; params: unknown; resolve: (v: unknown) => void; reject: (e: Error) => void }> = [];
+
+  /** Event listeners */
+  private eventListeners: Map<string, Array<(...args: unknown[]) => void>> = new Map();
+
   constructor(options: ClientOptions = {}) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
+  }
+
+  /** Register an event listener ('reconnecting' | 'reconnected' | 'disconnected') */
+  on(event: string, listener: (...args: unknown[]) => void): () => void {
+    const listeners = this.eventListeners.get(event) || [];
+    listeners.push(listener);
+    this.eventListeners.set(event, listeners);
+    return () => {
+      const arr = this.eventListeners.get(event) || [];
+      const idx = arr.indexOf(listener);
+      if (idx !== -1) arr.splice(idx, 1);
+    };
+  }
+
+  private emit(event: string, ...args: unknown[]): void {
+    const listeners = this.eventListeners.get(event) || [];
+    for (const listener of listeners) {
+      try { listener(...args); } catch { /* ignore */ }
+    }
   }
 
   /**
@@ -146,6 +185,8 @@ export class TivanaClient {
     this.connected = false;
     this.ws = null;
 
+    this.emit("disconnected");
+
     // Reject all pending requests
     for (const [id, request] of this.pending) {
       clearTimeout(request.timeout);
@@ -153,12 +194,63 @@ export class TivanaClient {
       this.pending.delete(id);
     }
 
-    // Auto-reconnect if enabled
-    if (this.options.autoReconnect) {
-      setTimeout(() => {
-        this.connect().catch(console.error);
-      }, this.options.reconnectDelay);
+    // Auto-reconnect with exponential backoff if enabled
+    if (this.options.autoReconnect && this.reconnectState !== "reconnecting") {
+      this.attemptReconnect();
     }
+  }
+
+  /**
+   * Attempt to reconnect with exponential backoff
+   */
+  private attemptReconnect(): void {
+    if (this.reconnectState === "reconnecting") return;
+    this.reconnectState = "reconnecting";
+    this.currentReconnectDelay = this.options.reconnectDelay;
+
+    this.emit("reconnecting");
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+
+    this.reconnectTimer = setTimeout(async () => {
+      try {
+        await this.connect();
+
+        // Re-attach session if we had one
+        if (this.sessionId) {
+          await this.request("session.get", { sessionId: this.sessionId });
+        }
+
+        // Reconnected successfully
+        this.reconnectState = "connected";
+        this.currentReconnectDelay = this.options.reconnectDelay;
+
+        this.emit("reconnected");
+        this.options.onReconnect();
+
+        // Replay queued commands
+        const queue = [...this.commandQueue];
+        this.commandQueue = [];
+        for (const cmd of queue) {
+          try {
+            const result = await this.request(cmd.method, cmd.params);
+            cmd.resolve(result);
+          } catch (e) {
+            cmd.reject(e instanceof Error ? e : new Error(String(e)));
+          }
+        }
+      } catch {
+        // Exponential backoff: double the delay up to max
+        this.currentReconnectDelay = Math.min(
+          this.currentReconnectDelay * 2,
+          this.options.maxReconnectDelay,
+        );
+        this.scheduleReconnect();
+      }
+    }, this.currentReconnectDelay);
   }
 
   /**
@@ -209,10 +301,22 @@ export class TivanaClient {
   }
 
   /**
-   * Send a request and wait for response
+   * Send a request and wait for response.
+   * If reconnecting, queues the command for replay after reconnect.
    */
   private async request<T>(method: string, params?: unknown): Promise<T> {
     if (!this.connected || !this.ws) {
+      // If we're reconnecting, queue the command
+      if (this.reconnectState === "reconnecting") {
+        return new Promise<T>((resolve, reject) => {
+          this.commandQueue.push({
+            method,
+            params,
+            resolve: resolve as (v: unknown) => void,
+            reject,
+          });
+        });
+      }
       throw new Error("Not connected to runtime");
     }
 
@@ -283,6 +387,41 @@ export class TivanaClient {
       "session.list"
     );
     return result.sessions;
+  }
+
+  //===========================================================================
+  // Tab Management API
+  //===========================================================================
+
+  /**
+   * List all open tabs in the browser
+   */
+  async tabs(): Promise<TabInfo[]> {
+    const result = await this.request<{ tabs: TabInfo[]; count: number }>(
+      "session.tabs"
+    );
+    return result.tabs;
+  }
+
+  /**
+   * Switch to a different tab by target ID
+   */
+  async switchTab(targetId: string): Promise<{ targetId: string; url: string; title: string }> {
+    return this.request("session.switchTab", { targetId });
+  }
+
+  /**
+   * Open a new tab with optional URL
+   */
+  async newTab(url?: string): Promise<{ targetId: string; url: string; title: string }> {
+    return this.request("session.newTab", url ? { url } : {});
+  }
+
+  /**
+   * Close a tab by target ID
+   */
+  async closeTab(targetId: string): Promise<{ closed: boolean; targetId: string }> {
+    return this.request("session.closeTab", { targetId });
   }
 
   //===========================================================================
@@ -529,9 +668,22 @@ export class TivanaClient {
   }
 
   /**
-   * Disconnect from runtime
+   * Disconnect from runtime. Stops auto-reconnect if active.
    */
   disconnect(): void {
+    // Stop any reconnect attempts
+    this.reconnectState = "idle";
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    // Reject queued commands
+    for (const cmd of this.commandQueue) {
+      cmd.reject(new Error("Client disconnected"));
+    }
+    this.commandQueue = [];
+
     if (this.ws) {
       this.ws.close();
       this.ws = null;

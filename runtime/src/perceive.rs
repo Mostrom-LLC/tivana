@@ -542,9 +542,25 @@ impl Perceiver {
         debug!("Getting page elements");
 
         // JavaScript to extract interactive elements
+        // Uses a persistent counter stored on window to maintain stable IDs within a page session
         let script = r#"(() => {
             const elements = [];
-            let elementCounter = 1;
+            // Persist element counter across calls for ID stability
+            if (!window.__tivana_element_counter) {
+                window.__tivana_element_counter = 1;
+                window.__tivana_element_map = new WeakMap();
+            }
+
+            const getStableId = (el) => {
+                let id = window.__tivana_element_map.get(el);
+                if (!id) {
+                    id = 'e' + (window.__tivana_element_counter++);
+                    window.__tivana_element_map.set(el, id);
+                }
+                // Also set data attribute for reverse lookup (scrollIntoView, etc.)
+                el.setAttribute('data-tivana-id', id);
+                return id;
+            };
 
             // Interactive element selectors
             const selector = [
@@ -590,14 +606,88 @@ impl Perceiver {
                     role = el.type || 'text';
                 }
 
-                // Get accessible name
-                let name = el.getAttribute('aria-label') ||
-                           el.getAttribute('aria-labelledby') && document.getElementById(el.getAttribute('aria-labelledby'))?.textContent ||
-                           el.getAttribute('title') ||
-                           el.getAttribute('placeholder') ||
-                           el.innerText?.trim()?.slice(0, 100) ||
-                           el.value ||
-                           null;
+                // Get accessible name — with robust label resolution for form controls
+                let name = null;
+
+                // 1. aria-label (explicit)
+                name = el.getAttribute('aria-label');
+
+                // 2. aria-labelledby (reference)
+                if (!name) {
+                    const lblBy = el.getAttribute('aria-labelledby');
+                    if (lblBy) {
+                        name = lblBy.split(/\s+/).map(id => document.getElementById(id)?.textContent?.trim()).filter(Boolean).join(' ');
+                    }
+                }
+
+                // 3. Associated <label> element (for radio, checkbox, and other inputs)
+                if (!name && el.id) {
+                    const assocLabel = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                    if (assocLabel) name = assocLabel.textContent?.trim()?.slice(0, 100);
+                }
+
+                // 4. Parent <label> wrapper
+                if (!name) {
+                    const parentLabel = el.closest('label');
+                    if (parentLabel) {
+                        // Get label text excluding the input's own text
+                        const clone = parentLabel.cloneNode(true);
+                        clone.querySelectorAll('input, select, textarea').forEach(c => c.remove());
+                        name = clone.textContent?.trim()?.slice(0, 100);
+                    }
+                }
+
+                // 5. For radio/checkbox: look for sibling text or nearest visible text
+                if (!name && (el.type === 'radio' || el.type === 'checkbox')) {
+                    // Check next sibling text
+                    let sib = el.nextSibling;
+                    while (sib) {
+                        if (sib.nodeType === 3 && sib.textContent?.trim()) {
+                            name = sib.textContent.trim().slice(0, 100);
+                            break;
+                        }
+                        if (sib.nodeType === 1) {
+                            name = sib.textContent?.trim()?.slice(0, 100);
+                            break;
+                        }
+                        sib = sib.nextSibling;
+                    }
+                }
+
+                // 6. For radio/checkbox: find the fieldset/legend (question group name)
+                let groupLabel = null;
+                if (el.type === 'radio' || el.type === 'checkbox') {
+                    const fieldset = el.closest('fieldset');
+                    if (fieldset) {
+                        const legend = fieldset.querySelector('legend');
+                        if (legend) groupLabel = legend.textContent?.trim()?.slice(0, 100);
+                    }
+                    // Also check aria role=radiogroup or role=group
+                    if (!groupLabel) {
+                        const group = el.closest('[role="radiogroup"], [role="group"]');
+                        if (group) {
+                            const grpLabel = group.getAttribute('aria-label') ||
+                                (group.getAttribute('aria-labelledby') && document.getElementById(group.getAttribute('aria-labelledby'))?.textContent?.trim());
+                            if (grpLabel) groupLabel = grpLabel.slice(0, 100);
+                        }
+                    }
+                }
+
+                // 7. Fallbacks: title, placeholder, innerText, value
+                if (!name) name = el.getAttribute('title');
+                if (!name) name = el.getAttribute('placeholder');
+                if (!name) {
+                    const inner = el.innerText?.trim()?.slice(0, 100);
+                    if (inner) name = inner;
+                }
+                if (!name && el.value) name = el.value;
+
+                // Combine group label with option name for radio/checkbox
+                if (groupLabel && name) {
+                    name = groupLabel + ' → ' + name;
+                } else if (groupLabel && !name) {
+                    name = groupLabel;
+                }
 
                 // Get value for inputs
                 let value = null;
@@ -626,7 +716,7 @@ impl Perceiver {
                 };
 
                 elements.push({
-                    id: 'e' + (elementCounter++),
+                    id: getStableId(el),
                     role: role,
                     name: name,
                     value: value,
@@ -862,14 +952,20 @@ impl Perceiver {
     ) -> Result<Option<BoundingBox>, TivanaError> {
         debug!(element_id, "Resolving element bounds");
 
-        // Element IDs are like e1, e2, etc. - need to re-query
-        // Since we generate these dynamically, we need to re-enumerate and find
-        let elements = Self::elements(page).await?;
+        // Use data-tivana-id attribute for direct lookup (O(1) instead of re-enumerating all elements)
+        let script = format!(
+            r#"(() => {{
+                const el = document.querySelector('[data-tivana-id="{}"]');
+                if (!el) return null;
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 && rect.height === 0) return null;
+                return {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }};
+            }})()"#,
+            element_id
+        );
 
-        Ok(elements
-            .into_iter()
-            .find(|e| e.id == element_id)
-            .and_then(|e| e.bounds))
+        let bounds: Option<BoundingBox> = page.evaluate(&script).await?;
+        Ok(bounds)
     }
 }
 
