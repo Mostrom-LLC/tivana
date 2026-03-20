@@ -18,7 +18,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// If no pong is received within this duration, consider the connection stale
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
 
-use crate::act::{ActionTarget, Actor, ClickOptions, ScrollDirection, ScrollOptions, TypeOptions};
+use crate::act::{ActionTarget, Actor, BatchAction, ClickOptions, ScrollDirection, ScrollOptions, TypeOptions};
 use crate::browser::{BrowserLaunchConfig, BrowserManager};
 use crate::captcha::CaptchaSolver;
 use crate::cli::Args;
@@ -448,6 +448,8 @@ impl Server {
             "act.focus" => self.handle_act_focus(&request).await,
             "act.select" => self.handle_act_select(&request).await,
             "act.waitFor" => self.handle_act_wait_for(&request).await,
+            "act.batch" => self.handle_act_batch(&request).await,
+            "act.fillForm" => self.handle_act_fill_form(&request).await,
 
             // CAPTCHA methods
             "captcha.detect" => self.handle_captcha_detect(&request).await,
@@ -1318,6 +1320,81 @@ impl Server {
             .map_err(|e| {
                 ProtocolError::new(crate::error::ErrorCode::ActionTimeout, e.to_string())
             })?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    // Batch action handler
+
+    async fn handle_act_batch(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let actions: Vec<BatchAction> = request
+            .params
+            .get("actions")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .ok_or_else(|| ProtocolError::missing_field("actions"))?;
+
+        let stop_on_error: bool = request
+            .params
+            .get("stopOnError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let mouse_pos = self
+            .sessions
+            .get_mouse_position(&session_id)
+            .await
+            .ok();
+
+        let result =
+            Actor::execute_batch(&page, &actions, stop_on_error, mouse_pos.as_ref()).await;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    // Form fill handler
+
+    async fn handle_act_fill_form(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let fields = request
+            .params
+            .get("fields")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| ProtocolError::missing_field("fields"))?;
+
+        let submit = request
+            .params
+            .get("submit")
+            .and_then(|v| v.as_str());
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let mouse_pos = self
+            .sessions
+            .get_mouse_position(&session_id)
+            .await
+            .ok();
+
+        let result =
+            Actor::fill_form(&page, fields, submit, mouse_pos.as_ref()).await;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }

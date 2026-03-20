@@ -262,6 +262,89 @@ pub enum WaitCondition {
     Delay { duration_ms: u64 },
 }
 
+/// A single action within a batch
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchAction {
+    /// Action type: click, type, press, scroll, navigate, focus, hover, select
+    #[serde(rename = "type")]
+    pub action_type: String,
+
+    /// Target element
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<ActionTarget>,
+
+    /// Text to type (for "type" action)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+
+    /// Key to press (for "press" action)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+
+    /// Modifier keys (for "press" action)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modifiers: Option<Vec<String>>,
+
+    /// Scroll direction (for "scroll" action)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+
+    /// Scroll amount (for "scroll" action)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<f64>,
+
+    /// URL (for "navigate" action)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+
+    /// Value (for "select" action)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+
+    /// Override delay between this action and the next (ms)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u64>,
+}
+
+/// Result of a single action within a batch
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchActionResult {
+    pub success: bool,
+    pub action: String,
+    pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Result of a batch execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchResult {
+    pub results: Vec<BatchActionResult>,
+    pub total_duration_ms: u64,
+}
+
+/// Result of a form fill operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormFillResult {
+    pub fields_completed: usize,
+    pub total_fields: usize,
+    pub duration_ms: u64,
+    pub submitted: bool,
+    pub errors: Vec<FormFieldError>,
+}
+
+/// Error for a specific form field
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormFieldError {
+    pub field: String,
+    pub error: String,
+}
+
 /// Action executor
 pub struct Actor;
 
@@ -786,6 +869,236 @@ impl Actor {
             .with_duration(duration))
     }
 
+    /// Execute a batch of actions sequentially
+    pub async fn execute_batch(
+        page: &Arc<PageHandle>,
+        actions: &[BatchAction],
+        stop_on_error: bool,
+        mouse_pos: Option<&Arc<RwLock<(f64, f64)>>>,
+    ) -> BatchResult {
+        let start = std::time::Instant::now();
+        let mut results = Vec::with_capacity(actions.len());
+
+        for action in actions {
+            let action_start = std::time::Instant::now();
+            let action_type = action.action_type.clone();
+
+            let outcome = Self::execute_single_batch_action(page, action, mouse_pos).await;
+
+            let duration_ms = action_start.elapsed().as_millis() as u64;
+
+            match outcome {
+                Ok(_) => {
+                    results.push(BatchActionResult {
+                        success: true,
+                        action: action_type,
+                        duration_ms,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    results.push(BatchActionResult {
+                        success: false,
+                        action: action_type,
+                        duration_ms,
+                        error: Some(err_msg),
+                    });
+                    if stop_on_error {
+                        break;
+                    }
+                }
+            }
+
+            // Inter-action delay (human-like default ~80ms, overridable)
+            let delay = action.delay_ms.unwrap_or(80);
+            if delay > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+            }
+        }
+
+        let total_duration_ms = start.elapsed().as_millis() as u64;
+        BatchResult {
+            results,
+            total_duration_ms,
+        }
+    }
+
+    /// Execute a single action from a batch
+    async fn execute_single_batch_action(
+        page: &Arc<PageHandle>,
+        action: &BatchAction,
+        mouse_pos: Option<&Arc<RwLock<(f64, f64)>>>,
+    ) -> Result<ActionResult, TivanaError> {
+        match action.action_type.as_str() {
+            "click" => {
+                let target = action
+                    .target
+                    .as_ref()
+                    .ok_or_else(|| TivanaError::Browser("click requires target".into()))?;
+                Self::click(page, target, &ClickOptions::default(), mouse_pos).await
+            }
+            "type" => {
+                let text = action
+                    .text
+                    .as_deref()
+                    .ok_or_else(|| TivanaError::Browser("type requires text".into()))?;
+                Self::type_text(
+                    page,
+                    text,
+                    action.target.as_ref(),
+                    &TypeOptions::default(),
+                    mouse_pos,
+                )
+                .await
+            }
+            "press" => {
+                let key = action
+                    .key
+                    .as_deref()
+                    .ok_or_else(|| TivanaError::Browser("press requires key".into()))?;
+                let modifiers = action.modifiers.as_deref().unwrap_or(&[]);
+                Self::press(page, key, modifiers).await
+            }
+            "scroll" => {
+                let direction = match action.direction.as_deref() {
+                    Some("up") => ScrollDirection::Up,
+                    Some("left") => ScrollDirection::Left,
+                    Some("right") => ScrollDirection::Right,
+                    _ => ScrollDirection::Down,
+                };
+                let amount = action.amount.map(|a| a as i32).unwrap_or(100);
+                let options = ScrollOptions {
+                    direction,
+                    amount,
+                    smooth: true,
+                };
+                Self::scroll(page, action.target.as_ref(), &options).await
+            }
+            "navigate" => {
+                let url = action
+                    .url
+                    .as_deref()
+                    .ok_or_else(|| TivanaError::Browser("navigate requires url".into()))?;
+                Self::navigate(page, url).await
+            }
+            "hover" => {
+                let target = action
+                    .target
+                    .as_ref()
+                    .ok_or_else(|| TivanaError::Browser("hover requires target".into()))?;
+                Self::hover(page, target).await
+            }
+            "focus" => {
+                let target = action
+                    .target
+                    .as_ref()
+                    .ok_or_else(|| TivanaError::Browser("focus requires target".into()))?;
+                Self::focus(page, target).await
+            }
+            "select" => {
+                let target = action
+                    .target
+                    .as_ref()
+                    .ok_or_else(|| TivanaError::Browser("select requires target".into()))?;
+                let value = action
+                    .value
+                    .as_deref()
+                    .ok_or_else(|| TivanaError::Browser("select requires value".into()))?;
+                Self::select(page, target, value).await
+            }
+            other => Err(TivanaError::Browser(format!(
+                "Unknown batch action type: {}",
+                other
+            ))),
+        }
+    }
+
+    /// Fill a form by mapping field IDs to values
+    pub async fn fill_form(
+        page: &Arc<PageHandle>,
+        fields: &serde_json::Map<String, serde_json::Value>,
+        submit: Option<&str>,
+        mouse_pos: Option<&Arc<RwLock<(f64, f64)>>>,
+    ) -> FormFillResult {
+        let start = std::time::Instant::now();
+        let total_fields = fields.len();
+        let mut fields_completed = 0;
+        let mut errors = Vec::new();
+
+        for (field_id, value) in fields {
+            let target = ActionTarget::element_id(field_id);
+
+            let result = match value {
+                serde_json::Value::String(text) => {
+                    // String value → click + type
+                    Self::type_text(
+                        page,
+                        text,
+                        Some(&target),
+                        &TypeOptions::default(),
+                        mouse_pos,
+                    )
+                    .await
+                }
+                serde_json::Value::Bool(true) => {
+                    // true → click (checkbox/radio)
+                    Self::click(page, &target, &ClickOptions::default(), mouse_pos).await
+                }
+                serde_json::Value::Bool(false) => {
+                    // false → skip
+                    fields_completed += 1;
+                    continue;
+                }
+                _ => {
+                    errors.push(FormFieldError {
+                        field: field_id.clone(),
+                        error: "Unsupported value type".into(),
+                    });
+                    continue;
+                }
+            };
+
+            match result {
+                Ok(_) => {
+                    fields_completed += 1;
+                    // Small delay between fields for human-like pacing
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+                Err(e) => {
+                    errors.push(FormFieldError {
+                        field: field_id.clone(),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        // Submit if requested
+        let mut submitted = false;
+        if let Some(submit_id) = submit {
+            let submit_target = ActionTarget::element_id(submit_id);
+            match Self::click(page, &submit_target, &ClickOptions::default(), mouse_pos).await {
+                Ok(_) => submitted = true,
+                Err(e) => {
+                    errors.push(FormFieldError {
+                        field: submit_id.to_string(),
+                        error: format!("Submit failed: {}", e),
+                    });
+                }
+            }
+        }
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        FormFillResult {
+            fields_completed,
+            total_fields,
+            duration_ms,
+            submitted,
+            errors,
+        }
+    }
+
     /// Wait for a condition
     pub async fn wait_for(
         page: &Arc<PageHandle>,
@@ -966,5 +1279,73 @@ mod tests {
         let result = ActionResult::failure("Element not found");
         assert!(!result.success);
         assert!(result.data.is_some());
+    }
+
+    #[test]
+    fn test_batch_action_deserialize() {
+        let json = serde_json::json!({
+            "type": "click",
+            "target": { "elementId": "e5" }
+        });
+        let action: BatchAction = serde_json::from_value(json).unwrap();
+        assert_eq!(action.action_type, "click");
+        assert!(action.target.is_some());
+        assert_eq!(action.target.unwrap().element_id, Some("e5".to_string()));
+    }
+
+    #[test]
+    fn test_batch_action_type_with_text() {
+        let json = serde_json::json!({
+            "type": "type",
+            "target": { "elementId": "e13" },
+            "text": "hello",
+            "delayMs": 50
+        });
+        let action: BatchAction = serde_json::from_value(json).unwrap();
+        assert_eq!(action.action_type, "type");
+        assert_eq!(action.text, Some("hello".to_string()));
+        assert_eq!(action.delay_ms, Some(50));
+    }
+
+    #[test]
+    fn test_batch_result_serialize() {
+        let result = BatchResult {
+            results: vec![
+                BatchActionResult {
+                    success: true,
+                    action: "click".to_string(),
+                    duration_ms: 45,
+                    error: None,
+                },
+                BatchActionResult {
+                    success: false,
+                    action: "type".to_string(),
+                    duration_ms: 10,
+                    error: Some("target not found".to_string()),
+                },
+            ],
+            total_duration_ms: 55,
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["results"].as_array().unwrap().len(), 2);
+        assert_eq!(json["totalDurationMs"], 55);
+    }
+
+    #[test]
+    fn test_form_fill_result_serialize() {
+        let result = FormFillResult {
+            fields_completed: 3,
+            total_fields: 4,
+            duration_ms: 500,
+            submitted: true,
+            errors: vec![FormFieldError {
+                field: "e10".to_string(),
+                error: "not found".to_string(),
+            }],
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["fieldsCompleted"], 3);
+        assert_eq!(json["submitted"], true);
+        assert_eq!(json["errors"].as_array().unwrap().len(), 1);
     }
 }

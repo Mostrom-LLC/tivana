@@ -412,6 +412,63 @@ export interface ActionResult {
   durationMs: number;
 }
 
+//=============================================================================
+// Batch Action Types
+//=============================================================================
+
+/** A single action within a batch */
+export interface BatchAction {
+  /** Action type */
+  type: 'click' | 'type' | 'press' | 'scroll' | 'navigate' | 'focus' | 'hover' | 'select';
+
+  /** Target element ID or selector */
+  target?: string;
+
+  /** Text to type (for "type" action) */
+  text?: string;
+
+  /** Key to press (for "press" action) */
+  key?: string;
+
+  /** Modifier keys (for "press" action) */
+  modifiers?: string[];
+
+  /** Scroll direction */
+  direction?: 'up' | 'down' | 'left' | 'right';
+
+  /** Scroll amount in pixels */
+  amount?: number;
+
+  /** URL (for "navigate" action) */
+  url?: string;
+
+  /** Value (for "select" action) */
+  value?: string;
+
+  /** Override delay between this action and the next (ms) */
+  delayMs?: number;
+}
+
+/** Result of a batch execution */
+export interface BatchResult {
+  results: Array<{
+    success: boolean;
+    action: string;
+    durationMs: number;
+    error?: string;
+  }>;
+  totalDurationMs: number;
+}
+
+/** Result of a form fill operation */
+export interface FormFillResult {
+  fieldsCompleted: number;
+  totalFields: number;
+  durationMs: number;
+  submitted: boolean;
+  errors: Array<{ field: string; error: string }>;
+}
+
 /** Navigation result */
 export interface NavigationResult {
   /** Final URL after navigation */

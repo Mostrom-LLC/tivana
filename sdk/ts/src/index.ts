@@ -81,6 +81,11 @@ export type {
   NavigationResult,
   FindElementsParams,
 
+  // Batch & Form Fill
+  BatchAction,
+  BatchResult,
+  FormFillResult,
+
   // Options
   ClientOptions,
 } from "./types";

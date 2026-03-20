@@ -8,12 +8,15 @@
 import type {
   ActionResult,
   ActionTarget,
+  BatchAction,
+  BatchResult,
   CaptchaInfo,
   CaptchaSolveResult,
   ClickOptions,
   ClickTarget,
   ClientOptions,
   Element,
+  FormFillResult,
   IncomingMessage,
   MutationCallback,
   MutationEvent,
@@ -670,6 +673,63 @@ export class TivanaClient {
   }
 
   //===========================================================================
+  // Batch & Form Fill API
+  //===========================================================================
+
+  /**
+   * Execute a batch of actions in a single roundtrip
+   *
+   * @param actions Array of actions to execute sequentially
+   * @param options Batch options
+   */
+  async batch(
+    actions: BatchAction[],
+    options?: { stopOnError?: boolean }
+  ): Promise<BatchResult> {
+    // Convert string targets to ActionTarget objects
+    const wireActions = actions.map((a) => {
+      const wire: Record<string, unknown> = { type: a.type };
+      if (a.target) {
+        const t = a.target;
+        wire.target =
+          t.startsWith("e") && /^e\d+$/.test(t)
+            ? { elementId: t }
+            : { selector: t };
+      }
+      if (a.text !== undefined) wire.text = a.text;
+      if (a.key !== undefined) wire.key = a.key;
+      if (a.modifiers !== undefined) wire.modifiers = a.modifiers;
+      if (a.direction !== undefined) wire.direction = a.direction;
+      if (a.amount !== undefined) wire.amount = a.amount;
+      if (a.url !== undefined) wire.url = a.url;
+      if (a.value !== undefined) wire.value = a.value;
+      if (a.delayMs !== undefined) wire.delayMs = a.delayMs;
+      return wire;
+    });
+
+    return this.request<BatchResult>("act.batch", {
+      actions: wireActions,
+      stopOnError: options?.stopOnError ?? false,
+    });
+  }
+
+  /**
+   * Fill a form in a single roundtrip
+   *
+   * @param fields Map of element IDs to values (string for text, boolean for checkboxes)
+   * @param submit Optional element ID of submit button to click after filling
+   */
+  async fillForm(
+    fields: Record<string, string | boolean>,
+    submit?: string
+  ): Promise<FormFillResult> {
+    return this.request<FormFillResult>("act.fillForm", {
+      fields,
+      submit,
+    });
+  }
+
+  //===========================================================================
   // Connection API
   //===========================================================================
 
@@ -802,5 +862,19 @@ export const act = {
 
   async select(target: string, value: string): Promise<ActionResult> {
     return getClient().select(target, value);
+  },
+
+  async batch(
+    actions: BatchAction[],
+    options?: { stopOnError?: boolean }
+  ): Promise<BatchResult> {
+    return getClient().batch(actions, options);
+  },
+
+  async fillForm(
+    fields: Record<string, string | boolean>,
+    submit?: string
+  ): Promise<FormFillResult> {
+    return getClient().fillForm(fields, submit);
   },
 };
