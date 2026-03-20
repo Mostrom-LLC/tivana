@@ -656,6 +656,7 @@ impl BrowserManager {
     pub async fn launch(
         &self,
         config: Option<BrowserLaunchConfig>,
+        proxy: Option<&crate::proxy::ProxyConfig>,
     ) -> Result<BrowserHandle, TivanaError> {
         let config = config.unwrap_or_else(|| self.default_config.clone());
 
@@ -711,6 +712,13 @@ impl BrowserManager {
         // Add custom args
         for arg in &config.args {
             builder = builder.arg(arg);
+        }
+
+        // Add proxy server flag if configured
+        if let Some(proxy) = proxy {
+            let proxy_arg = proxy.to_chrome_arg();
+            info!(proxy = %proxy_arg, "Configuring proxy");
+            builder = builder.arg(proxy_arg);
         }
 
         let browser_config = builder

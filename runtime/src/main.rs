@@ -15,6 +15,7 @@ mod network;
 mod perceive;
 mod persistence;
 mod protocol;
+mod proxy;
 mod server;
 mod session;
 

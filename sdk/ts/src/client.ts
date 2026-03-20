@@ -37,6 +37,7 @@ import type {
   PageMetadata,
   ElementInfo,
   TabInfo,
+  ProxyConfig,
 } from "./types";
 import { PROTOCOL_VERSION } from "./types";
 
@@ -963,6 +964,44 @@ export class TivanaClient {
    */
   async clearStorage(): Promise<void> {
     await this.request("storage.clear");
+  }
+
+  //===========================================================================
+  // Proxy API (MOS-120)
+  //===========================================================================
+
+  /**
+   * Set proxy for the current session
+   *
+   * @param config Proxy configuration
+   */
+  async setProxy(config: ProxyConfig): Promise<void> {
+    await this.request("proxy.set", config);
+  }
+
+  /**
+   * Set a proxy pool for rotation
+   *
+   * @param proxies Array of proxy configurations
+   */
+  async setProxyPool(proxies: ProxyConfig[]): Promise<{ poolSize: number; current: ProxyConfig | null }> {
+    return this.request("proxy.pool", { proxies });
+  }
+
+  /**
+   * Rotate to the next proxy in the pool
+   */
+  async rotateProxy(): Promise<ProxyConfig> {
+    const result = await this.request<{ proxy: ProxyConfig }>("proxy.rotate");
+    return result.proxy;
+  }
+
+  /**
+   * Get the current proxy configuration
+   */
+  async currentProxy(): Promise<ProxyConfig | null> {
+    const result = await this.request<{ proxy: ProxyConfig | null }>("proxy.current");
+    return result.proxy;
   }
 
   //===========================================================================

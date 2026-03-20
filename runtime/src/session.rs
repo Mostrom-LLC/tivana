@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::browser::{BrowserHandle, PageHandle};
 use crate::error::{ProtocolError, TivanaError};
 use crate::perceive::{MutationEvent, MutationObserverHandle};
+use crate::proxy::{ProxyConfig, ProxyPool};
 
 /// Session lifecycle states
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +54,12 @@ pub struct Session {
 
     /// Mutation events receiver
     pub mutation_rx: Option<mpsc::Receiver<MutationEvent>>,
+
+    /// Current proxy configuration
+    pub proxy: Option<ProxyConfig>,
+
+    /// Proxy pool for rotation
+    pub proxy_pool: Option<ProxyPool>,
 }
 
 // Manual Debug implementation since BrowserHandle contains non-Debug types
@@ -68,6 +75,8 @@ impl std::fmt::Debug for Session {
                 "mutation_observer",
                 &self.mutation_observer_handle.is_some(),
             )
+            .field("proxy", &self.proxy)
+            .field("proxy_pool", &self.proxy_pool)
             .finish()
     }
 }
@@ -86,11 +95,15 @@ pub struct SessionConfig {
 
     /// Viewport height
     pub viewport_height: Option<u32>,
+
+    /// Proxy configuration
+    pub proxy: Option<ProxyConfig>,
 }
 
 impl Session {
     /// Create a new session with the given ID
     pub fn new(id: String, config: SessionConfig) -> Self {
+        let proxy = config.proxy.clone();
         Self {
             id,
             state: SessionState::Created,
@@ -99,6 +112,8 @@ impl Session {
             config,
             mutation_observer_handle: None,
             mutation_rx: None,
+            proxy,
+            proxy_pool: None,
         }
     }
 

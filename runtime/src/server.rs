@@ -30,6 +30,7 @@ use crate::protocol::{
     parse_request, serialize_outbound, EventMessage, OutboundMessage, ResponseMessage,
     PROTOCOL_VERSION,
 };
+use crate::proxy::{ProxyConfig, ProxyPool};
 use crate::session::{SessionConfig, SessionRegistry};
 
 /// WebSocket server
@@ -116,6 +117,7 @@ impl Server {
                                     headless: ps.headless,
                                     viewport_width: None,
                                     viewport_height: None,
+                                    proxy: None,
                                 };
 
                                 let session_id =
@@ -485,6 +487,12 @@ impl Server {
             "captcha.detect" => self.handle_captcha_detect(&request).await,
             "captcha.solve" => self.handle_captcha_solve(&request).await,
 
+            // Proxy methods
+            "proxy.set" => self.handle_proxy_set(&request).await,
+            "proxy.pool" => self.handle_proxy_pool(&request).await,
+            "proxy.rotate" => self.handle_proxy_rotate(&request).await,
+            "proxy.current" => self.handle_proxy_current(&request).await,
+
             // Unknown method
             _ => Err(ProtocolError::new(
                 crate::error::ErrorCode::UnknownMethod,
@@ -555,6 +563,12 @@ impl Server {
         &self,
         request: &crate::protocol::RequestMessage,
     ) -> Result<serde_json::Value, ProtocolError> {
+        // Parse optional proxy config from params
+        let proxy: Option<ProxyConfig> = request
+            .params
+            .get("proxy")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
         let config = SessionConfig {
             initial_url: request
                 .params
@@ -576,6 +590,7 @@ impl Server {
                 .get("viewportHeight")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32),
+            proxy,
         };
 
         let session_id = self.sessions.create(config.clone()).await;
@@ -600,7 +615,7 @@ impl Server {
                 ..Default::default()
             };
             self.browser_manager
-                .launch(Some(browser_config))
+                .launch(Some(browser_config), config.proxy.as_ref())
                 .await
                 .map_err(|e| ProtocolError::browser_launch_failed(e.to_string()))?
         };
@@ -2099,6 +2114,151 @@ impl Server {
             })?;
 
         Ok(serde_json::json!({ "cleared": true }))
+    }
+
+    //=========================================================================
+    // Proxy handlers
+    //=========================================================================
+
+    async fn handle_proxy_set(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let server = request
+            .params
+            .get("server")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("server"))?
+            .to_string();
+
+        let protocol: crate::proxy::ProxyProtocol = request
+            .params
+            .get("protocol")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let username = request
+            .params
+            .get("username")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let password = request
+            .params
+            .get("password")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let proxy = ProxyConfig {
+            server,
+            protocol,
+            username,
+            password,
+        };
+
+        self.sessions
+            .with_session(&session_id, |session| {
+                session.proxy = Some(proxy.clone());
+                Ok(())
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        Ok(serde_json::json!({
+            "success": true,
+            "proxy": proxy
+        }))
+    }
+
+    async fn handle_proxy_pool(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let proxies_value = request
+            .params
+            .get("proxies")
+            .ok_or_else(|| ProtocolError::missing_field("proxies"))?;
+
+        let proxies: Vec<ProxyConfig> = serde_json::from_value(proxies_value.clone())
+            .map_err(|e| {
+                ProtocolError::new(
+                    crate::error::ErrorCode::InvalidField,
+                    format!("Invalid proxies array: {}", e),
+                )
+            })?;
+
+        let count = proxies.len();
+        let pool = ProxyPool::from_list(proxies);
+
+        // Set the first proxy as current
+        let current = pool.current().cloned();
+
+        self.sessions
+            .with_session(&session_id, |session| {
+                if let Some(ref proxy) = current {
+                    session.proxy = Some(proxy.clone());
+                }
+                session.proxy_pool = Some(pool);
+                Ok(())
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        Ok(serde_json::json!({
+            "success": true,
+            "poolSize": count,
+            "current": current
+        }))
+    }
+
+    async fn handle_proxy_rotate(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let next_proxy = self
+            .sessions
+            .with_session(&session_id, |session| {
+                let pool = session.proxy_pool.as_ref().ok_or_else(|| {
+                    TivanaError::Session("No proxy pool configured for this session".to_string())
+                })?;
+                let next = pool.next().cloned().ok_or_else(|| {
+                    TivanaError::Session("Proxy pool is empty".to_string())
+                })?;
+                session.proxy = Some(next.clone());
+                Ok(next)
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        Ok(serde_json::json!({
+            "success": true,
+            "proxy": next_proxy
+        }))
+    }
+
+    async fn handle_proxy_current(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let proxy = self
+            .sessions
+            .with_session(&session_id, |session| {
+                Ok(session.proxy.clone())
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        Ok(serde_json::json!({
+            "proxy": proxy
+        }))
     }
 }
 

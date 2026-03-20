@@ -93,6 +93,9 @@ export type SessionStatus = "created" | "launching" | "active" | "closed";
 export interface SessionCreateParams {
   /** Override headless mode */
   headless?: boolean;
+
+  /** Proxy configuration for the session */
+  proxy?: ProxyConfig;
 }
 
 /** Session create result */
@@ -677,6 +680,28 @@ export interface SetCookieOptions {
 
   /** Secure flag */
   secure?: boolean;
+}
+
+//=============================================================================
+// Proxy Types
+//=============================================================================
+
+/** Proxy protocol */
+export type ProxyProtocol = "http" | "https" | "socks5";
+
+/** Proxy configuration */
+export interface ProxyConfig {
+  /** Proxy server address (host:port) */
+  server: string;
+
+  /** Proxy protocol (default: http) */
+  protocol?: ProxyProtocol;
+
+  /** Username for authenticated proxies */
+  username?: string;
+
+  /** Password for authenticated proxies */
+  password?: string;
 }
 
 /** Client connection options */
