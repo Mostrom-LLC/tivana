@@ -15,6 +15,7 @@ import type {
   ClickOptions,
   ClickTarget,
   ClientOptions,
+  Cookie,
   Element,
   FormFillResult,
   IncomingMessage,
@@ -29,6 +30,7 @@ import type {
   SessionCreateParams,
   SessionCreateResult,
   SessionInfo,
+  SetCookieOptions,
   TypeOptions,
   AccessibilitySnapshot,
   TextContent,
@@ -829,6 +831,138 @@ export class TivanaClient {
       fields,
       submit,
     });
+  }
+
+  //===========================================================================
+  // Dialog Handling API (MOS-122)
+  //===========================================================================
+
+  /**
+   * Handle a JavaScript dialog (alert/confirm/prompt)
+   *
+   * @param action Whether to 'accept' or 'dismiss' the dialog
+   * @param promptText Optional text to enter for prompt dialogs
+   */
+  async handleDialog(
+    action: "accept" | "dismiss",
+    promptText?: string
+  ): Promise<ActionResult> {
+    return this.request<ActionResult>("act.handleDialog", {
+      action,
+      promptText,
+    });
+  }
+
+  //===========================================================================
+  // File Upload API (MOS-128)
+  //===========================================================================
+
+  /**
+   * Upload files to a file input element
+   *
+   * @param target Element ID or selector for the file input
+   * @param filePaths Array of absolute file paths to upload
+   */
+  async uploadFile(
+    target: string,
+    filePaths: string[]
+  ): Promise<ActionResult> {
+    const actionTarget: ActionTarget =
+      target.startsWith("e") && /^e\d+$/.test(target)
+        ? { elementId: target }
+        : { selector: target };
+
+    return this.request<ActionResult>("act.uploadFile", {
+      target: actionTarget,
+      filePaths,
+    });
+  }
+
+  //===========================================================================
+  // Cookie & Storage API (MOS-127)
+  //===========================================================================
+
+  /**
+   * Get all cookies for the current page
+   */
+  async getCookies(): Promise<Cookie[]> {
+    const result = await this.request<{ cookies: Cookie[] }>(
+      "storage.getCookies"
+    );
+    return result.cookies;
+  }
+
+  /**
+   * Set a cookie
+   *
+   * @param name Cookie name
+   * @param value Cookie value
+   * @param options Optional cookie attributes
+   */
+  async setCookie(
+    name: string,
+    value: string,
+    options?: SetCookieOptions
+  ): Promise<void> {
+    await this.request("storage.setCookie", {
+      name,
+      value,
+      ...options,
+    });
+  }
+
+  /**
+   * Clear all browser cookies
+   */
+  async clearCookies(): Promise<void> {
+    await this.request("storage.clearCookies");
+  }
+
+  /**
+   * Get all localStorage entries
+   */
+  async getLocalStorage(): Promise<Record<string, string>> {
+    const result = await this.request<{ entries: Record<string, string> }>(
+      "storage.getLocalStorage"
+    );
+    return result.entries;
+  }
+
+  /**
+   * Set a localStorage entry
+   *
+   * @param key Storage key
+   * @param value Storage value
+   */
+  async setLocalStorage(key: string, value: string): Promise<void> {
+    await this.request("storage.setLocalStorage", { key, value });
+  }
+
+  /**
+   * Get all sessionStorage entries
+   */
+  async getSessionStorage(): Promise<Record<string, string>> {
+    const result = await this.request<{ entries: Record<string, string> }>(
+      "storage.getSessionStorage"
+    );
+    return result.entries;
+  }
+
+  /**
+   * Set a sessionStorage entry
+   *
+   * @param key Storage key
+   * @param value Storage value
+   */
+  async setSessionStorage(key: string, value: string): Promise<void> {
+    await this.request("storage.setSessionStorage", { key, value });
+  }
+
+  /**
+   * Clear both localStorage and sessionStorage
+   */
+  async clearStorage(): Promise<void> {
+    await this.request("storage.clear");
   }
 
   //===========================================================================

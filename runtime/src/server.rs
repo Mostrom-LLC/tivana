@@ -465,6 +465,22 @@ impl Server {
             "network.requests" => self.handle_network_requests(&request).await,
             "network.clear" => self.handle_network_clear(&request).await,
 
+            // Dialog handling
+            "act.handleDialog" => self.handle_act_dialog(&request).await,
+
+            // File upload
+            "act.uploadFile" => self.handle_act_upload_file(&request).await,
+
+            // Storage methods
+            "storage.getCookies" => self.handle_storage_get_cookies(&request).await,
+            "storage.setCookie" => self.handle_storage_set_cookie(&request).await,
+            "storage.clearCookies" => self.handle_storage_clear_cookies(&request).await,
+            "storage.getLocalStorage" => self.handle_storage_get_local_storage(&request).await,
+            "storage.setLocalStorage" => self.handle_storage_set_local_storage(&request).await,
+            "storage.getSessionStorage" => self.handle_storage_get_session_storage(&request).await,
+            "storage.setSessionStorage" => self.handle_storage_set_session_storage(&request).await,
+            "storage.clear" => self.handle_storage_clear(&request).await,
+
             // CAPTCHA methods
             "captcha.detect" => self.handle_captcha_detect(&request).await,
             "captcha.solve" => self.handle_captcha_solve(&request).await,
@@ -1716,6 +1732,371 @@ impl Server {
                 format!("Network clear failed: {}", e),
             )
         })?;
+
+        Ok(serde_json::json!({ "cleared": true }))
+    }
+
+    // =========================================================================
+    // Dialog handling (MOS-122)
+    // =========================================================================
+
+    async fn handle_act_dialog(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let action = request
+            .params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("action"))?;
+
+        let prompt_text = request
+            .params
+            .get("promptText")
+            .and_then(|v| v.as_str());
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::handle_dialog(&page, action, prompt_text)
+            .await
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
+            })?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    // =========================================================================
+    // File upload (MOS-128)
+    // =========================================================================
+
+    async fn handle_act_upload_file(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let target = Self::parse_action_target(&request.params)
+            .ok_or_else(|| ProtocolError::missing_field("target"))?;
+
+        let file_paths: Vec<String> = request
+            .params
+            .get("filePaths")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .ok_or_else(|| ProtocolError::missing_field("filePaths"))?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::upload_file(&page, &target, &file_paths)
+            .await
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string())
+            })?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    // =========================================================================
+    // Cookie & storage management (MOS-127)
+    // =========================================================================
+
+    async fn handle_storage_get_cookies(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let cookies: serde_json::Value = page
+            .evaluate(
+                r#"(() => {
+                    return document.cookie.split('; ').filter(Boolean).map(c => {
+                        const [name, ...rest] = c.split('=');
+                        return {
+                            name: name,
+                            value: rest.join('='),
+                            domain: window.location.hostname,
+                            path: '/'
+                        };
+                    });
+                })()"#,
+            )
+            .await
+            .map_err(|e| {
+                ProtocolError::new(
+                    crate::error::ErrorCode::ActionFailed,
+                    format!("Failed to get cookies: {}", e),
+                )
+            })?;
+
+        Ok(serde_json::json!({ "cookies": cookies }))
+    }
+
+    async fn handle_storage_set_cookie(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let name = request
+            .params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("name"))?;
+
+        let value = request
+            .params
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("value"))?;
+
+        let path = request
+            .params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/");
+
+        let domain = request
+            .params
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let max_age = request
+            .params
+            .get("maxAge")
+            .and_then(|v| v.as_i64());
+
+        let secure = request
+            .params
+            .get("secure")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        // Build cookie string
+        let mut parts = vec![format!(
+            "{}={}",
+            serde_json::to_string(name).unwrap_or_default().trim_matches('"'),
+            serde_json::to_string(value).unwrap_or_default().trim_matches('"')
+        )];
+        parts.push(format!("path={}", path));
+        if !domain.is_empty() {
+            parts.push(format!("domain={}", domain));
+        }
+        if let Some(age) = max_age {
+            parts.push(format!("max-age={}", age));
+        }
+        if secure {
+            parts.push("secure".to_string());
+        }
+
+        let cookie_str = parts.join("; ");
+        let script = format!(
+            "document.cookie = {}",
+            serde_json::to_string(&cookie_str).unwrap_or_default()
+        );
+
+        page.evaluate_void(&script).await.map_err(|e| {
+            ProtocolError::new(
+                crate::error::ErrorCode::ActionFailed,
+                format!("Failed to set cookie: {}", e),
+            )
+        })?;
+
+        Ok(serde_json::json!({ "success": true }))
+    }
+
+    async fn handle_storage_clear_cookies(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        // Use CDP Network.clearBrowserCookies
+        use chromiumoxide::cdp::browser_protocol::network::ClearBrowserCookiesParams;
+        let cmd = ClearBrowserCookiesParams::default();
+        page.inner().execute(cmd).await.map_err(|e| {
+            ProtocolError::new(
+                crate::error::ErrorCode::ActionFailed,
+                format!("Failed to clear cookies: {}", e),
+            )
+        })?;
+
+        Ok(serde_json::json!({ "cleared": true }))
+    }
+
+    async fn handle_storage_get_local_storage(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let entries: serde_json::Value = page
+            .evaluate("Object.fromEntries(Object.entries(localStorage))")
+            .await
+            .map_err(|e| {
+                ProtocolError::new(
+                    crate::error::ErrorCode::ActionFailed,
+                    format!("Failed to get localStorage: {}", e),
+                )
+            })?;
+
+        Ok(serde_json::json!({ "entries": entries }))
+    }
+
+    async fn handle_storage_set_local_storage(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let key = request
+            .params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("key"))?;
+
+        let value = request
+            .params
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("value"))?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let script = format!(
+            "localStorage.setItem({}, {})",
+            serde_json::to_string(key).unwrap_or_default(),
+            serde_json::to_string(value).unwrap_or_default()
+        );
+
+        page.evaluate_void(&script).await.map_err(|e| {
+            ProtocolError::new(
+                crate::error::ErrorCode::ActionFailed,
+                format!("Failed to set localStorage: {}", e),
+            )
+        })?;
+
+        Ok(serde_json::json!({ "success": true }))
+    }
+
+    async fn handle_storage_get_session_storage(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let entries: serde_json::Value = page
+            .evaluate("Object.fromEntries(Object.entries(sessionStorage))")
+            .await
+            .map_err(|e| {
+                ProtocolError::new(
+                    crate::error::ErrorCode::ActionFailed,
+                    format!("Failed to get sessionStorage: {}", e),
+                )
+            })?;
+
+        Ok(serde_json::json!({ "entries": entries }))
+    }
+
+    async fn handle_storage_set_session_storage(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let key = request
+            .params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("key"))?;
+
+        let value = request
+            .params
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("value"))?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let script = format!(
+            "sessionStorage.setItem({}, {})",
+            serde_json::to_string(key).unwrap_or_default(),
+            serde_json::to_string(value).unwrap_or_default()
+        );
+
+        page.evaluate_void(&script).await.map_err(|e| {
+            ProtocolError::new(
+                crate::error::ErrorCode::ActionFailed,
+                format!("Failed to set sessionStorage: {}", e),
+            )
+        })?;
+
+        Ok(serde_json::json!({ "success": true }))
+    }
+
+    async fn handle_storage_clear(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        page.evaluate_void("localStorage.clear(); sessionStorage.clear()")
+            .await
+            .map_err(|e| {
+                ProtocolError::new(
+                    crate::error::ErrorCode::ActionFailed,
+                    format!("Failed to clear storage: {}", e),
+                )
+            })?;
 
         Ok(serde_json::json!({ "cleared": true }))
     }

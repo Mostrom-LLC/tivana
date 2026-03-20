@@ -645,6 +645,40 @@ export interface NetworkRequest {
 // Client Options
 //=============================================================================
 
+//=============================================================================
+// Cookie & Storage Types
+//=============================================================================
+
+/** A parsed cookie */
+export interface Cookie {
+  /** Cookie name */
+  name: string;
+
+  /** Cookie value */
+  value: string;
+
+  /** Cookie domain */
+  domain: string;
+
+  /** Cookie path */
+  path: string;
+}
+
+/** Options for setting a cookie */
+export interface SetCookieOptions {
+  /** Cookie path (default: "/") */
+  path?: string;
+
+  /** Cookie domain */
+  domain?: string;
+
+  /** Max age in seconds */
+  maxAge?: number;
+
+  /** Secure flag */
+  secure?: boolean;
+}
+
 /** Client connection options */
 export interface ClientOptions {
   /** WebSocket URL (default: ws://localhost:9876) */

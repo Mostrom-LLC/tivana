@@ -501,15 +501,28 @@ impl Actor {
         }
     }
 
-    /// Navigate to a URL
+    /// Navigate to a URL, waiting for DOMContentLoaded before returning
     pub async fn navigate(page: &Arc<PageHandle>, url: &str) -> Result<ActionResult, TivanaError> {
         let start = std::time::Instant::now();
         info!(url, "Navigating");
 
         let nav_result = page.navigate(url).await?;
 
-        // Wait for navigation to settle
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        // Wait for at least DOMContentLoaded (interactive) instead of a hardcoded sleep
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+        loop {
+            let ready: String = page
+                .evaluate("document.readyState")
+                .await
+                .unwrap_or_else(|_| "loading".to_string());
+            if ready == "interactive" || ready == "complete" {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                break; // Don't error — navigation happened, page just didn't fully load
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
 
         let duration = start.elapsed().as_millis() as u64;
 
@@ -517,6 +530,129 @@ impl Actor {
 
         let mut result = ActionResult::success()
             .with_data(serde_json::to_value(&nav_result).unwrap_or_default())
+            .with_duration(duration);
+
+        if let Some(state) = page_state {
+            result = result.with_page_state(state);
+        }
+
+        Ok(result)
+    }
+
+    /// Handle a JavaScript dialog (alert/confirm/prompt)
+    pub async fn handle_dialog(
+        page: &Arc<PageHandle>,
+        action: &str,
+        prompt_text: Option<&str>,
+    ) -> Result<ActionResult, TivanaError> {
+        let start = std::time::Instant::now();
+        info!(action, ?prompt_text, "Handling dialog");
+
+        let accept = action == "accept";
+        let text = prompt_text.unwrap_or("");
+
+        // Use CDP Page.handleJavaScriptDialog
+        let cmd = chromiumoxide::cdp::browser_protocol::page::HandleJavaScriptDialogParams::builder()
+            .accept(accept)
+            .prompt_text(text)
+            .build()
+            .map_err(|e| TivanaError::Browser(format!("Failed to build dialog command: {}", e)))?;
+
+        page.inner()
+            .execute(cmd)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to handle dialog: {}", e)))?;
+
+        let duration = start.elapsed().as_millis() as u64;
+
+        Ok(ActionResult::success()
+            .with_data(serde_json::json!({
+                "action": action,
+                "promptText": text,
+            }))
+            .with_duration(duration))
+    }
+
+    /// Upload files to a file input element via CDP DOM.setFileInputFiles
+    pub async fn upload_file(
+        page: &Arc<PageHandle>,
+        target: &ActionTarget,
+        file_paths: &[String],
+    ) -> Result<ActionResult, TivanaError> {
+        let start = std::time::Instant::now();
+        info!(?target, file_count = file_paths.len(), "Uploading files");
+
+        // Build JS to find the element and get its backendNodeId via Runtime.evaluate
+        let find_script = if let Some(ref id) = target.element_id {
+            format!(
+                r#"document.querySelector('[data-tivana-id="' + {} + '"]')"#,
+                serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_string())
+            )
+        } else if let Some(ref selector) = target.selector {
+            format!(
+                "document.querySelector({})",
+                serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string())
+            )
+        } else {
+            return Err(TivanaError::Browser(
+                "uploadFile requires elementId or selector target".to_string(),
+            ));
+        };
+
+        // Use Runtime.evaluate to get a RemoteObject, then DOM.describeNode for backendNodeId
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+        let eval_params = EvaluateParams::builder()
+            .expression(&find_script)
+            .build()
+            .map_err(|e| TivanaError::Browser(format!("Failed to build evaluate: {}", e)))?;
+
+        let eval_result = page
+            .inner()
+            .execute(eval_params)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to evaluate: {}", e)))?;
+
+        let object_id = eval_result
+            .result
+            .result
+            .object_id
+            .as_ref()
+            .ok_or_else(|| TivanaError::Browser("Element not found for file upload".to_string()))?;
+
+        // Use DOM.describeNode to get backendNodeId
+        use chromiumoxide::cdp::browser_protocol::dom::{DescribeNodeParams, SetFileInputFilesParams};
+        let describe_params = DescribeNodeParams::builder()
+            .object_id(object_id.clone())
+            .build();
+
+        let describe_result = page
+            .inner()
+            .execute(describe_params)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to describe node: {}", e)))?;
+
+        let backend_node_id = describe_result.node.backend_node_id;
+
+        // Use DOM.setFileInputFiles with backendNodeId
+        let set_files_params = SetFileInputFilesParams::builder()
+            .files(file_paths.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
+            .backend_node_id(backend_node_id)
+            .build()
+            .map_err(|e| TivanaError::Browser(format!("Failed to build setFileInputFiles: {}", e)))?;
+
+        page.inner()
+            .execute(set_files_params)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Failed to set files: {}", e)))?;
+
+        let duration = start.elapsed().as_millis() as u64;
+        let page_state = Perceiver::page_state(page).await.ok();
+
+        let mut result = ActionResult::success()
+            .with_data(serde_json::json!({
+                "filesSet": file_paths.len(),
+                "filePaths": file_paths,
+            }))
             .with_duration(duration);
 
         if let Some(state) = page_state {
