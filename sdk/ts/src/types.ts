@@ -576,6 +576,75 @@ export interface CaptchaSolveResult {
 // Client Options
 //=============================================================================
 
+//=============================================================================
+// Screenshot Types
+//=============================================================================
+
+/** Screenshot format */
+export type ScreenshotFormat = "png" | "jpeg";
+
+/** Screenshot options */
+export interface ScreenshotOptions {
+  /** Image format (default: png) */
+  format?: ScreenshotFormat;
+
+  /** JPEG quality 0-100 (only used for jpeg format) */
+  quality?: number;
+
+  /** Capture full scrollable page vs viewport only */
+  fullPage?: boolean;
+
+  /** Clip to specific region */
+  clip?: BoundingBox;
+}
+
+/** Screenshot result */
+export interface ScreenshotResult {
+  /** Base64-encoded image data */
+  data: string;
+
+  /** Image format used */
+  format: string;
+
+  /** Image width in pixels */
+  width: number;
+
+  /** Image height in pixels */
+  height: number;
+}
+
+//=============================================================================
+// Network Monitoring Types
+//=============================================================================
+
+/** A captured network request */
+export interface NetworkRequest {
+  /** Request URL */
+  url: string;
+
+  /** HTTP method (GET, POST, etc.) */
+  method: string;
+
+  /** HTTP status code (0 if pending/failed) */
+  status: number;
+
+  /** Response status text */
+  statusText: string;
+
+  /** Request type (fetch or xhr) */
+  requestType: string;
+
+  /** Timestamp in milliseconds since epoch */
+  timestampMs: number;
+
+  /** Response duration in milliseconds (0 if pending) */
+  durationMs: number;
+}
+
+//=============================================================================
+// Client Options
+//=============================================================================
+
 /** Client connection options */
 export interface ClientOptions {
   /** WebSocket URL (default: ws://localhost:9876) */

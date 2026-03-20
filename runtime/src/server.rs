@@ -23,7 +23,8 @@ use crate::browser::{BrowserLaunchConfig, BrowserManager};
 use crate::captcha::CaptchaSolver;
 use crate::cli::Args;
 use crate::error::{ProtocolError, TivanaError};
-use crate::perceive::{setup_mutation_observer, stop_mutation_observer, Perceiver};
+use crate::network::NetworkManager;
+use crate::perceive::{setup_mutation_observer, stop_mutation_observer, Perceiver, ScreenshotOptions};
 use crate::persistence;
 use crate::protocol::{
     parse_request, serialize_outbound, EventMessage, OutboundMessage, ResponseMessage,
@@ -455,6 +456,14 @@ impl Server {
             "act.waitForFunction" => self.handle_act_wait_for_function(&request).await,
             "act.batch" => self.handle_act_batch(&request).await,
             "act.fillForm" => self.handle_act_fill_form(&request).await,
+
+            // Screenshot
+            "perceive.screenshot" => self.handle_perceive_screenshot(&request).await,
+
+            // Network monitoring
+            "network.enable" => self.handle_network_enable(&request).await,
+            "network.requests" => self.handle_network_requests(&request).await,
+            "network.clear" => self.handle_network_clear(&request).await,
 
             // CAPTCHA methods
             "captcha.detect" => self.handle_captcha_detect(&request).await,
@@ -1598,6 +1607,117 @@ impl Server {
         let result = CaptchaSolver::solve(&page).await?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    // =========================================================================
+    // Screenshot handler
+    // =========================================================================
+
+    async fn handle_perceive_screenshot(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let options: ScreenshotOptions = serde_json::from_value(request.params.clone())
+            .unwrap_or_default();
+
+        let result = Perceiver::screenshot(&page, options)
+            .await
+            .map_err(|e| {
+                ProtocolError::new(
+                    crate::error::ErrorCode::PerceptionFailed,
+                    format!("Screenshot failed: {}", e),
+                )
+            })?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    // =========================================================================
+    // Network monitoring handlers
+    // =========================================================================
+
+    async fn handle_network_enable(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        NetworkManager::enable(&page).await.map_err(|e| {
+            ProtocolError::new(
+                crate::error::ErrorCode::InternalError,
+                format!("Network enable failed: {}", e),
+            )
+        })?;
+
+        Ok(serde_json::json!({ "enabled": true }))
+    }
+
+    async fn handle_network_requests(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let url_pattern = request
+            .params
+            .get("urlPattern")
+            .and_then(|v| v.as_str());
+
+        let requests = NetworkManager::get_requests(&page, url_pattern)
+            .await
+            .map_err(|e| {
+                ProtocolError::new(
+                    crate::error::ErrorCode::InternalError,
+                    format!("Network requests failed: {}", e),
+                )
+            })?;
+
+        Ok(serde_json::json!({
+            "requests": requests,
+            "count": requests.len(),
+        }))
+    }
+
+    async fn handle_network_clear(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        NetworkManager::clear(&page).await.map_err(|e| {
+            ProtocolError::new(
+                crate::error::ErrorCode::InternalError,
+                format!("Network clear failed: {}", e),
+            )
+        })?;
+
+        Ok(serde_json::json!({ "cleared": true }))
     }
 }
 

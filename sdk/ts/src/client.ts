@@ -20,8 +20,11 @@ import type {
   IncomingMessage,
   MutationCallback,
   MutationEvent,
+  NetworkRequest,
   OutgoingMessage,
   PageState,
+  ScreenshotOptions,
+  ScreenshotResult,
   ScrollDirection,
   SessionCreateParams,
   SessionCreateResult,
@@ -504,6 +507,44 @@ export class TivanaClient {
         this.mutationCallbacks.splice(index, 1);
       }
     };
+  }
+
+  /**
+   * Take a screenshot of the current page
+   */
+  async screenshot(options?: ScreenshotOptions): Promise<ScreenshotResult> {
+    return this.request<ScreenshotResult>("perceive.screenshot", options || {});
+  }
+
+  //===========================================================================
+  // Network Monitoring API
+  //===========================================================================
+
+  /**
+   * Enable network request capture (inject monitoring script)
+   */
+  async enableNetworkCapture(): Promise<void> {
+    await this.request("network.enable");
+  }
+
+  /**
+   * Get captured network requests
+   *
+   * @param urlPattern Optional URL substring to filter by
+   */
+  async getNetworkRequests(urlPattern?: string): Promise<NetworkRequest[]> {
+    const result = await this.request<{ requests: NetworkRequest[] }>(
+      "network.requests",
+      urlPattern ? { urlPattern } : {}
+    );
+    return result.requests;
+  }
+
+  /**
+   * Clear all captured network requests
+   */
+  async clearNetworkRequests(): Promise<void> {
+    await this.request("network.clear");
   }
 
   //===========================================================================

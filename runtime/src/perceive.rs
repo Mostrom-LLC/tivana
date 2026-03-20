@@ -3,6 +3,11 @@
 //! This module provides methods for extracting structured information
 //! from the browser page using CDP commands and JavaScript evaluation.
 
+use base64::Engine;
+use chromiumoxide::cdp::browser_protocol::page::{
+    CaptureScreenshotFormat, Viewport,
+};
+use chromiumoxide::page::ScreenshotParams;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -967,6 +972,121 @@ impl Perceiver {
         let bounds: Option<BoundingBox> = page.evaluate(&script).await?;
         Ok(bounds)
     }
+
+    /// Capture a screenshot of the current page
+    pub async fn screenshot(
+        page: &Arc<PageHandle>,
+        options: ScreenshotOptions,
+    ) -> Result<ScreenshotResult, TivanaError> {
+        debug!(?options, "Taking screenshot");
+
+        let format = match options.format {
+            ScreenshotFormat::Jpeg => CaptureScreenshotFormat::Jpeg,
+            ScreenshotFormat::Png => CaptureScreenshotFormat::Png,
+        };
+
+        let mut builder = ScreenshotParams::builder()
+            .format(format)
+            .full_page(options.full_page);
+
+        if let Some(quality) = options.quality {
+            builder = builder.quality(quality as i64);
+        }
+
+        if let Some(ref clip) = options.clip {
+            let viewport = Viewport::builder()
+                .x(clip.x)
+                .y(clip.y)
+                .width(clip.width)
+                .height(clip.height)
+                .scale(1.0)
+                .build()
+                .map_err(|e| TivanaError::Browser(format!("Failed to build viewport: {}", e)))?;
+            builder = builder.clip(viewport);
+        }
+
+        let params = builder.build();
+
+        let bytes = page
+            .inner()
+            .screenshot(params)
+            .await
+            .map_err(|e| TivanaError::Browser(format!("Screenshot failed: {}", e)))?;
+
+        // Get viewport dimensions for the response
+        let dims: ViewportDimensions = page
+            .evaluate(
+                r#"({ width: window.innerWidth, height: window.innerHeight })"#,
+            )
+            .await
+            .unwrap_or(ViewportDimensions {
+                width: 0,
+                height: 0,
+            });
+
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+        let format_str = match options.format {
+            ScreenshotFormat::Png => "png",
+            ScreenshotFormat::Jpeg => "jpeg",
+        };
+
+        Ok(ScreenshotResult {
+            data,
+            format: format_str.to_string(),
+            width: dims.width,
+            height: dims.height,
+        })
+    }
+}
+
+/// Screenshot format
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenshotFormat {
+    #[default]
+    Png,
+    Jpeg,
+}
+
+/// Screenshot options
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotOptions {
+    /// Image format (png or jpeg)
+    #[serde(default)]
+    pub format: ScreenshotFormat,
+
+    /// JPEG quality (0-100), only used for jpeg format
+    pub quality: Option<u32>,
+
+    /// Capture full scrollable page vs viewport only
+    #[serde(default)]
+    pub full_page: bool,
+
+    /// Clip to specific region
+    pub clip: Option<BoundingBox>,
+}
+
+/// Screenshot result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotResult {
+    /// Base64-encoded image data
+    pub data: String,
+    /// Image format used
+    pub format: String,
+    /// Image width in pixels
+    pub width: u32,
+    /// Image height in pixels
+    pub height: u32,
+}
+
+/// Helper struct for viewport dimensions
+#[derive(Debug, Deserialize)]
+struct ViewportDimensions {
+    width: u32,
+    height: u32,
 }
 
 #[cfg(test)]
