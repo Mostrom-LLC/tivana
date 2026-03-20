@@ -20,6 +20,7 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
 
 use crate::act::{ActionTarget, Actor, ClickOptions, ScrollDirection, ScrollOptions, TypeOptions};
 use crate::browser::{BrowserLaunchConfig, BrowserManager};
+use crate::captcha::CaptchaSolver;
 use crate::cli::Args;
 use crate::error::{ProtocolError, TivanaError};
 use crate::perceive::{setup_mutation_observer, stop_mutation_observer, Perceiver};
@@ -447,6 +448,10 @@ impl Server {
             "act.focus" => self.handle_act_focus(&request).await,
             "act.select" => self.handle_act_select(&request).await,
             "act.waitFor" => self.handle_act_wait_for(&request).await,
+
+            // CAPTCHA methods
+            "captcha.detect" => self.handle_captcha_detect(&request).await,
+            "captcha.solve" => self.handle_captcha_solve(&request).await,
 
             // Unknown method
             _ => Err(ProtocolError::new(
@@ -1316,6 +1321,42 @@ impl Server {
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }
+
+    // CAPTCHA handlers
+
+    async fn handle_captcha_detect(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let info = CaptchaSolver::detect(&page).await?;
+
+        Ok(serde_json::to_value(&info).unwrap_or_default())
+    }
+
+    async fn handle_captcha_solve(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = CaptchaSolver::solve(&page).await?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
 }
 
 #[cfg(test)]
@@ -1336,3 +1377,4 @@ mod tests {
         assert_eq!(server.addr.port(), 9876);
     }
 }
+

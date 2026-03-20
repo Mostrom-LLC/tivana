@@ -474,6 +474,48 @@ export interface FindElementsParams {
 }
 
 //=============================================================================
+// CAPTCHA Types
+//=============================================================================
+
+/** CAPTCHA type detected on the page */
+export type CaptchaType =
+  | "recaptcha_v2"
+  | "recaptcha_v3"
+  | "hcaptcha"
+  | "turnstile"
+  | "none";
+
+/** Information about a detected CAPTCHA */
+export interface CaptchaInfo {
+  /** Type of CAPTCHA detected */
+  captchaType: CaptchaType;
+
+  /** Site key extracted from the page */
+  sitekey?: string;
+
+  /** CSS selector for the CAPTCHA iframe/element */
+  iframeSelector?: string;
+
+  /** Whether the CAPTCHA is visible on page */
+  isVisible: boolean;
+}
+
+/** Result of a CAPTCHA solve attempt */
+export interface CaptchaSolveResult {
+  /** Whether the CAPTCHA was solved */
+  solved: boolean;
+
+  /** Method used to solve (stealth, audio, none) */
+  method: string;
+
+  /** Time taken in milliseconds */
+  durationMs: number;
+
+  /** Error message if solve failed */
+  error?: string;
+}
+
+//=============================================================================
 // Client Options
 //=============================================================================
 

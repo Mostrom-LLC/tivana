@@ -8,6 +8,8 @@
 import type {
   ActionResult,
   ActionTarget,
+  CaptchaInfo,
+  CaptchaSolveResult,
   ClickOptions,
   ClickTarget,
   ClientOptions,
@@ -647,6 +649,24 @@ export class TivanaClient {
       condition,
       timeoutMs: timeoutMs || this.options.timeout,
     });
+  }
+
+  //===========================================================================
+  // CAPTCHA API
+  //===========================================================================
+
+  /**
+   * Detect CAPTCHA presence on the current page
+   */
+  async detectCaptcha(): Promise<CaptchaInfo> {
+    return this.request<CaptchaInfo>("captcha.detect");
+  }
+
+  /**
+   * Attempt to solve any detected CAPTCHA automatically
+   */
+  async solveCaptcha(): Promise<CaptchaSolveResult> {
+    return this.request<CaptchaSolveResult>("captcha.solve");
   }
 
   //===========================================================================

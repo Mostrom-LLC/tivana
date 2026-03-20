@@ -8,6 +8,7 @@
 
 mod act;
 mod browser;
+mod captcha;
 mod cli;
 mod error;
 mod perceive;
