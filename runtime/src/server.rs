@@ -437,6 +437,8 @@ impl Server {
             "perceive.mutations" => self.handle_perceive_mutations(&request).await,
             "perceive.mutations.poll" => self.handle_perceive_mutations_poll(&request).await,
             "perceive.mutations.stop" => self.handle_perceive_mutations_stop(&request).await,
+            "perceive.evaluate" => self.handle_perceive_evaluate(&request).await,
+            "perceive.evaluateVoid" => self.handle_perceive_evaluate_void(&request).await,
 
             // Action methods
             "act.click" => self.handle_act_click(&request).await,
@@ -929,6 +931,73 @@ impl Server {
             })?;
 
         Ok(serde_json::to_value(&elements).unwrap_or_default())
+    }
+
+    async fn handle_perceive_evaluate(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let expression = request
+            .params
+            .get("expression")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("expression"))?;
+
+        let await_promise = request
+            .params
+            .get("awaitPromise")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let js = if await_promise {
+            format!("(async () => {{ return {}; }})()", expression)
+        } else {
+            expression.to_string()
+        };
+
+        let result: serde_json::Value = page
+            .evaluate::<serde_json::Value>(&js)
+            .await
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, format!("Evaluate failed: {}", e))
+            })?;
+
+        Ok(serde_json::json!({ "result": result }))
+    }
+
+    async fn handle_perceive_evaluate_void(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let expression = request
+            .params
+            .get("expression")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("expression"))?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        page.evaluate_void(expression)
+            .await
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, format!("Evaluate failed: {}", e))
+            })?;
+
+        Ok(serde_json::json!({ "success": true }))
     }
 
     async fn handle_perceive_mutations(

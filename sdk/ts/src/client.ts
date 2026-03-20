@@ -476,6 +476,24 @@ export class TivanaClient {
   }
 
   /**
+   * Evaluate a JavaScript expression on the page and return the result
+   */
+  async evaluate<T = any>(expression: string, awaitPromise?: boolean): Promise<T> {
+    const result = await this.request<{ result: T }>("perceive.evaluate", {
+      expression,
+      awaitPromise,
+    });
+    return result.result;
+  }
+
+  /**
+   * Evaluate a JavaScript expression on the page without returning a value
+   */
+  async evaluateVoid(expression: string): Promise<void> {
+    await this.request("perceive.evaluateVoid", { expression });
+  }
+
+  /**
    * Subscribe to mutation events
    */
   onMutation(callback: MutationCallback): () => void {
