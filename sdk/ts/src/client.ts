@@ -672,6 +672,49 @@ export class TivanaClient {
     });
   }
 
+  /**
+   * Wait for a CSS selector to match a visible element
+   *
+   * @param selector CSS selector to wait for
+   * @param timeoutMs Timeout in milliseconds (default: 30000)
+   */
+  async waitForSelector(
+    selector: string,
+    timeoutMs?: number
+  ): Promise<ActionResult> {
+    return this.request<ActionResult>("act.waitForSelector", {
+      selector,
+      timeoutMs: timeoutMs || this.options.timeout,
+    });
+  }
+
+  /**
+   * Wait for a page navigation (URL change)
+   *
+   * @param timeoutMs Timeout in milliseconds (default: 30000)
+   */
+  async waitForNavigation(timeoutMs?: number): Promise<ActionResult> {
+    return this.request<ActionResult>("act.waitForNavigation", {
+      timeoutMs: timeoutMs || this.options.timeout,
+    });
+  }
+
+  /**
+   * Wait for a JavaScript expression to return a truthy value
+   *
+   * @param expression JavaScript expression to evaluate
+   * @param timeoutMs Timeout in milliseconds (default: 30000)
+   */
+  async waitForFunction(
+    expression: string,
+    timeoutMs?: number
+  ): Promise<ActionResult> {
+    return this.request<ActionResult>("act.waitForFunction", {
+      expression,
+      timeoutMs: timeoutMs || this.options.timeout,
+    });
+  }
+
   //===========================================================================
   // CAPTCHA API
   //===========================================================================
@@ -894,5 +937,23 @@ export const act = {
     submit?: string
   ): Promise<FormFillResult> {
     return getClient().fillForm(fields, submit);
+  },
+
+  async waitForSelector(
+    selector: string,
+    timeoutMs?: number
+  ): Promise<ActionResult> {
+    return getClient().waitForSelector(selector, timeoutMs);
+  },
+
+  async waitForNavigation(timeoutMs?: number): Promise<ActionResult> {
+    return getClient().waitForNavigation(timeoutMs);
+  },
+
+  async waitForFunction(
+    expression: string,
+    timeoutMs?: number
+  ): Promise<ActionResult> {
+    return getClient().waitForFunction(expression, timeoutMs);
   },
 };

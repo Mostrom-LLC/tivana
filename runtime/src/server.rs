@@ -450,6 +450,9 @@ impl Server {
             "act.focus" => self.handle_act_focus(&request).await,
             "act.select" => self.handle_act_select(&request).await,
             "act.waitFor" => self.handle_act_wait_for(&request).await,
+            "act.waitForSelector" => self.handle_act_wait_for_selector(&request).await,
+            "act.waitForNavigation" => self.handle_act_wait_for_navigation(&request).await,
+            "act.waitForFunction" => self.handle_act_wait_for_function(&request).await,
             "act.batch" => self.handle_act_batch(&request).await,
             "act.fillForm" => self.handle_act_fill_form(&request).await,
 
@@ -1385,6 +1388,99 @@ impl Server {
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
         let result = Actor::wait_for(&page, &condition, timeout_ms)
+            .await
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::ActionTimeout, e.to_string())
+            })?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    async fn handle_act_wait_for_selector(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let selector = request
+            .params
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("selector"))?;
+
+        let timeout_ms: u64 = request
+            .params
+            .get("timeoutMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30000);
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::wait_for_selector(&page, selector, timeout_ms)
+            .await
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::ActionTimeout, e.to_string())
+            })?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    async fn handle_act_wait_for_navigation(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let timeout_ms: u64 = request
+            .params
+            .get("timeoutMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30000);
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::wait_for_navigation(&page, timeout_ms)
+            .await
+            .map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::ActionTimeout, e.to_string())
+            })?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    async fn handle_act_wait_for_function(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let expression = request
+            .params
+            .get("expression")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("expression"))?;
+
+        let timeout_ms: u64 = request
+            .params
+            .get("timeoutMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30000);
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::wait_for_function(&page, expression, timeout_ms)
             .await
             .map_err(|e| {
                 ProtocolError::new(crate::error::ErrorCode::ActionTimeout, e.to_string())

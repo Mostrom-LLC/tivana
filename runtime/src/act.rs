@@ -8,11 +8,17 @@ use std::sync::Arc;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::browser::PageHandle;
 use crate::error::TivanaError;
 use crate::perceive::{BoundingBox, PageState, Perceiver};
+
+/// Maximum retries for stale element recovery
+const STALE_ELEMENT_MAX_RETRIES: u32 = 3;
+
+/// Delay between stale element retries in milliseconds
+const STALE_ELEMENT_RETRY_DELAY_MS: u64 = 200;
 
 /// Result of an action
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -453,6 +459,48 @@ impl Actor {
         ))
     }
 
+    /// Resolve action target with automatic retry on stale element references.
+    ///
+    /// When an element_id lookup fails (DOM mutation made the data-tivana-id stale),
+    /// re-enumerates elements via Perceiver::elements() to refresh IDs and retries.
+    async fn resolve_target_with_retry(
+        page: &Arc<PageHandle>,
+        target: &ActionTarget,
+    ) -> Result<BoundingBox, TivanaError> {
+        let result = Self::resolve_target(page, target).await;
+
+        match &result {
+            Ok(_) => return result,
+            Err(_) if target.element_id.is_some() => {
+                // Element ID lookup failed — try re-enumerating to refresh data-tivana-id attrs
+                let element_id = target.element_id.as_ref().unwrap();
+                for attempt in 1..=STALE_ELEMENT_MAX_RETRIES {
+                    warn!(
+                        element_id,
+                        attempt,
+                        "Stale element detected, re-enumerating"
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                        STALE_ELEMENT_RETRY_DELAY_MS,
+                    ))
+                    .await;
+
+                    // Re-enumerate refreshes data-tivana-id attributes on the DOM
+                    let _ = Perceiver::elements(page).await;
+
+                    // Retry resolution
+                    if let Ok(bounds) = Self::resolve_target(page, target).await {
+                        info!(element_id, attempt, "Stale element recovered");
+                        return Ok(bounds);
+                    }
+                }
+                // All retries exhausted — return original error
+                result
+            }
+            Err(_) => result,
+        }
+    }
+
     /// Navigate to a URL
     pub async fn navigate(page: &Arc<PageHandle>, url: &str) -> Result<ActionResult, TivanaError> {
         let start = std::time::Instant::now();
@@ -529,7 +577,7 @@ impl Actor {
         Self::scroll_target_into_view(page, target).await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let bounds = Self::resolve_target(page, target).await?;
+        let bounds = Self::resolve_target_with_retry(page, target).await?;
         let (cx, cy) = bounds.center();
 
         // Add small random offset to click position (±2px)
@@ -768,7 +816,7 @@ impl Actor {
         let start = std::time::Instant::now();
         debug!(?target, "Hovering");
 
-        let bounds = Self::resolve_target(page, target).await?;
+        let bounds = Self::resolve_target_with_retry(page, target).await?;
         let (x, y) = bounds.center();
 
         // Move mouse to element (uses chromiumoxide's mouse_move equivalent via evaluate)
@@ -1231,6 +1279,154 @@ impl Actor {
         Ok(ActionResult::success()
             .with_page_state(page_state)
             .with_duration(duration))
+    }
+
+    /// Wait for a CSS selector to match a visible element on the page.
+    ///
+    /// Polls every 100ms until `document.querySelector(selector)` exists and is visible.
+    /// Returns the matched element info on success or errors on timeout.
+    pub async fn wait_for_selector(
+        page: &Arc<PageHandle>,
+        selector: &str,
+        timeout_ms: u64,
+    ) -> Result<ActionResult, TivanaError> {
+        let start = std::time::Instant::now();
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+        let script = format!(
+            r#"(() => {{
+                const el = document.querySelector({sel});
+                if (!el) return null;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') return null;
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 && rect.height === 0) return null;
+                return {{
+                    tagName: el.tagName.toLowerCase(),
+                    text: el.innerText?.trim()?.slice(0, 200) || null,
+                    bounds: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }}
+                }};
+            }})()"#,
+            sel = serde_json::to_string(selector).unwrap_or_default()
+        );
+
+        loop {
+            let result: Option<serde_json::Value> = page.evaluate(&script).await?;
+            if let Some(element_data) = result {
+                let duration = start.elapsed().as_millis() as u64;
+                let page_state = Perceiver::page_state(page).await?;
+                return Ok(ActionResult::success()
+                    .with_page_state(page_state)
+                    .with_data(element_data)
+                    .with_duration(duration));
+            }
+            if tokio::time::Instant::now() > deadline {
+                return Err(TivanaError::Browser(format!(
+                    "Timeout waiting for selector: {}",
+                    selector
+                )));
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Wait for a page navigation (URL change + DOMContentLoaded).
+    ///
+    /// Records the current URL, polls every 100ms until the URL changes,
+    /// then waits for the page to reach at least "interactive" readyState.
+    pub async fn wait_for_navigation(
+        page: &Arc<PageHandle>,
+        timeout_ms: u64,
+    ) -> Result<ActionResult, TivanaError> {
+        let start = std::time::Instant::now();
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+        // Record current URL
+        let initial_url: String = page.evaluate("window.location.href").await?;
+
+        // Wait for URL to change
+        loop {
+            let current_url: String = page.evaluate("window.location.href").await?;
+            if current_url != initial_url {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                return Err(TivanaError::Browser(
+                    "Timeout waiting for navigation".to_string(),
+                ));
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
+        // Wait for page to settle (at least DOMContentLoaded / interactive)
+        loop {
+            let ready: String = page
+                .evaluate("document.readyState")
+                .await
+                .unwrap_or_else(|_| "loading".to_string());
+            if ready == "interactive" || ready == "complete" {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                break; // Don't error — navigation happened, just didn't fully load
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
+        let duration = start.elapsed().as_millis() as u64;
+        let page_state = Perceiver::page_state(page).await?;
+
+        Ok(ActionResult::success()
+            .with_page_state(page_state)
+            .with_duration(duration))
+    }
+
+    /// Wait for a JavaScript expression to return a truthy value.
+    ///
+    /// Polls every 100ms until `expression` evaluates to a truthy value.
+    /// Returns the expression result on success or errors on timeout.
+    pub async fn wait_for_function(
+        page: &Arc<PageHandle>,
+        expression: &str,
+        timeout_ms: u64,
+    ) -> Result<ActionResult, TivanaError> {
+        let start = std::time::Instant::now();
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+        // Wrap in an IIFE that returns the value only if truthy, else null
+        let script = format!(
+            r#"(() => {{
+                const __result = (function() {{ return ({expr}); }})();
+                return __result ? __result : null;
+            }})()"#,
+            expr = expression
+        );
+
+        loop {
+            let result: serde_json::Value = page
+                .evaluate(&script)
+                .await
+                .unwrap_or(serde_json::Value::Null);
+
+            if !result.is_null() {
+                let duration = start.elapsed().as_millis() as u64;
+                let page_state = Perceiver::page_state(page).await?;
+                return Ok(ActionResult::success()
+                    .with_page_state(page_state)
+                    .with_data(serde_json::json!({ "result": result }))
+                    .with_duration(duration));
+            }
+            if tokio::time::Instant::now() > deadline {
+                return Err(TivanaError::Browser(format!(
+                    "Timeout waiting for function: {}",
+                    expression
+                )));
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
     }
 }
 
