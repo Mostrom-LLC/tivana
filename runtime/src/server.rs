@@ -631,10 +631,8 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        // Auto-clean orphaned about:blank tabs from session startup
-        if let Err(e) = self.clean_blank_tabs(&session_id).await {
-            warn!(session_id = %session_id, error = %e, "Failed to auto-clean blank tabs on create");
-        }
+        // Note: auto-clean removed — in --connect mode, the session's page starts as about:blank
+        // and would be erroneously cleaned. Users can call session.cleanTabs explicitly.
 
         // Navigate to initial URL if specified
         if let Some(url) = config.initial_url {
