@@ -79,6 +79,9 @@ function connectWebSocket() {
     reconnectDelay = 1000;
     updateBadge();
 
+    // Send handshake so runtime identifies this as an extension connection immediately
+    wsSend({ method: "extension.hello", params: { version: "0.1.0" } });
+
     // Re-announce all attached tabs
     for (const [, info] of attachedTabs) {
       wsSend({ method: "tab.attached", params: info });

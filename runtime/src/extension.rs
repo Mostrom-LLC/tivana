@@ -297,7 +297,8 @@ pub fn is_extension_message(text: &str) -> bool {
             if let Some(method) = val.get("method").and_then(|v| v.as_str()) {
                 return matches!(
                     method,
-                    "tab.attached"
+                    "extension.hello"
+                        | "tab.attached"
                         | "tab.detached"
                         | "tab.navigated"
                         | "cdp.event"

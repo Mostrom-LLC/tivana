@@ -460,6 +460,9 @@ impl Server {
                 // CDP events from extension — could forward to SDK clients in the future
                 debug!("Extension CDP event: {:?}", msg.get("params"));
             }
+            "extension.hello" => {
+                info!("Extension handshake received");
+            }
             "pong" => {
                 // Keepalive response, nothing to do
             }
