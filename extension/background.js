@@ -82,10 +82,43 @@ function connectWebSocket() {
     // Send handshake so runtime identifies this as an extension connection immediately
     wsSend({ method: "extension.hello", params: { version: "0.1.0" } });
 
-    // Re-announce all attached tabs
-    for (const [, info] of attachedTabs) {
-      wsSend({ method: "tab.attached", params: info });
+    // Re-announce attached tabs — but verify debugger is still connected first
+    for (const [tabId, info] of attachedTabs) {
+      try {
+        // Test if debugger is actually attached by sending a simple command
+        await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+          expression: "1",
+          returnByValue: true,
+        });
+        // Debugger still works — re-announce
+        wsSend({ method: "tab.attached", params: info });
+      } catch (e) {
+        console.log(`[tivana] Tab ${tabId} debugger stale, removing:`, e.message || e);
+        attachedTabs.delete(tabId);
+        // Try to re-attach
+        try {
+          await chrome.debugger.attach({ tabId }, "1.3");
+          const tab = await chrome.tabs.get(tabId);
+          const targets = await chrome.debugger.getTargets();
+          const target = targets.find(t => t.tabId === tabId);
+          info.targetId = target ? target.id : `tab-${tabId}`;
+          info.url = tab.url || info.url;
+          info.title = tab.title || info.title;
+          attachedTabs.set(tabId, info);
+          
+          // Re-enable domains
+          try { await chrome.debugger.sendCommand({ tabId }, "Runtime.enable"); } catch {}
+          try { await chrome.debugger.sendCommand({ tabId }, "Page.enable"); } catch {}
+          try { await chrome.debugger.sendCommand({ tabId }, "DOM.enable"); } catch {}
+          
+          wsSend({ method: "tab.attached", params: info });
+          console.log(`[tivana] Tab ${tabId} re-attached successfully`);
+        } catch (reattachErr) {
+          console.log(`[tivana] Tab ${tabId} re-attach failed:`, reattachErr.message || reattachErr);
+        }
+      }
     }
+    persistState();
   };
 
   ws.onmessage = (event) => {
@@ -135,6 +168,57 @@ function handleRuntimeMessage(data) {
   // Ping/pong keepalive
   if (msg.method === "ping") {
     wsSend({ method: "pong" });
+    return;
+  }
+
+  // Re-attach debugger to a tab (after navigation detaches it)
+  if (msg.method === "tab.reattach") {
+    const tabId = msg.params?.tabId;
+    if (!tabId) {
+      wsSend({ id: msg.id, error: "Missing tabId" });
+      return;
+    }
+    try {
+      // Get old session info if we had one
+      const oldInfo = attachedTabs.get(tabId);
+      const oldSessionId = oldInfo ? oldInfo.sessionId : `tivana-tab-${++sessionCounter}`;
+      
+      // Remove old entry if it exists
+      attachedTabs.delete(tabId);
+      
+      // Re-attach
+      await chrome.debugger.attach({ tabId }, "1.3");
+      const tab = await chrome.tabs.get(tabId);
+      const targets = await chrome.debugger.getTargets();
+      const target = targets.find(t => t.tabId === tabId);
+      const targetId = target ? target.id : `tab-${tabId}`;
+      
+      const info = {
+        tabId,
+        targetId,
+        sessionId: oldSessionId,
+        url: tab.url || "",
+        title: tab.title || "",
+      };
+      attachedTabs.set(tabId, info);
+      persistState();
+      updateBadge();
+      
+      // Re-enable required CDP domains
+      try { await chrome.debugger.sendCommand({ tabId }, "Runtime.enable"); } catch {}
+      try { await chrome.debugger.sendCommand({ tabId }, "Page.enable"); } catch {}
+      try { await chrome.debugger.sendCommand({ tabId }, "DOM.enable"); } catch {}
+      
+      // Notify runtime
+      wsSend({
+        method: "tab.attached",
+        params: info,
+      });
+      
+      wsSend({ id: msg.id, result: { reattached: true, ...info } });
+    } catch (e) {
+      wsSend({ id: msg.id, error: e.message || String(e) });
+    }
     return;
   }
 

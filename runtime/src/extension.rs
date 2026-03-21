@@ -255,20 +255,24 @@ impl ExtensionManager {
         let ext_session_id = self.get_extension_session_id(tivana_session_id).await
             .ok_or_else(|| "No extension session mapping found".to_string())?;
 
-        // Use Page.navigate which the extension intercepts and implements
-        // via chrome.tabs.update (avoids debugger detach)
-        let result = self.send_cdp_command(
-            &ext_session_id,
-            "Page.navigate",
-            serde_json::json!({ "url": url }),
+        // Use Page.navigate — the extension intercepts this and uses chrome.tabs.update
+        // which keeps the debugger attached (unlike window.location.href).
+        // Use a timeout because the CDP response may not come back during page transition.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(8000),
+            self.send_cdp_command(
+                &ext_session_id,
+                "Page.navigate",
+                serde_json::json!({ "url": url }),
+            )
         ).await;
 
-        // Wait for navigation to complete
+        // Wait for the new page to load
         tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
 
         match result {
-            Ok(r) => Ok(r),
-            Err(_) => Ok(serde_json::json!({"navigated": true, "url": url})),
+            Ok(Ok(r)) => Ok(r),
+            _ => Ok(serde_json::json!({"navigated": true, "url": url})),
         }
     }
 
@@ -430,6 +434,55 @@ impl ExtensionManager {
                 let mut pending = self.pending.lock().await;
                 pending.remove(&id);
                 Err("CDP command timed out".to_string())
+            }
+        }
+    }
+
+    /// Send a raw command to the extension (not wrapped as CDP)
+    pub async fn send_raw_command(
+        &self,
+        mut msg: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let ws = self.ws_tx.lock().await;
+        let tx = ws
+            .as_ref()
+            .ok_or_else(|| "Extension not connected".to_string())?
+            .clone();
+
+        let id = {
+            let mut counter = self.id_counter.lock().await;
+            *counter += 1;
+            counter.to_string()
+        };
+
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut pending = self.pending.lock().await;
+            pending.insert(id.clone(), PendingCdpRequest { tx: resp_tx });
+        }
+
+        msg["id"] = serde_json::Value::String(id.clone());
+
+        let msg_str = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
+        drop(ws);
+
+        tx.send(msg_str)
+            .await
+            .map_err(|_| "Failed to send to extension".to_string())?;
+
+        match tokio::time::timeout(std::time::Duration::from_secs(10), resp_rx).await {
+            Ok(Ok(response)) => {
+                if let Some(err) = response.error {
+                    Err(err)
+                } else {
+                    Ok(response.result.unwrap_or(serde_json::Value::Null))
+                }
+            }
+            Ok(Err(_)) => Err("Response channel closed".to_string()),
+            Err(_) => {
+                let mut pending = self.pending.lock().await;
+                pending.remove(&id);
+                Err("Raw command timed out".to_string())
             }
         }
     }

@@ -920,13 +920,24 @@ impl Server {
                 let url = request.params.get("url")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| ProtocolError::missing_field("url"))?;
-                let result = self.extension_manager.navigate(session_id, url).await
+                let _result = self.extension_manager.navigate(session_id, url).await
                     .map_err(|e| ProtocolError::internal(e))?;
-                // Wait for navigation
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                let state = self.extension_manager.page_state(session_id).await
-                    .map_err(|e| ProtocolError::internal(e))?;
-                Ok(state)
+                
+                // Try page state with retries — debugger may need time after navigation
+                for attempt in 0..3u32 {
+                    let state = tokio::time::timeout(
+                        std::time::Duration::from_millis(5000),
+                        self.extension_manager.page_state(session_id)
+                    ).await;
+                    if let Ok(Ok(s)) = state {
+                        return Ok(s);
+                    }
+                    if attempt < 2 {
+                        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+                    }
+                }
+                // Give up on page state, return minimal info
+                Ok(serde_json::json!({"url": url, "title": "unknown", "navigated": true}))
             }
             "act.click" => {
                 let target = request.params.get("target")
