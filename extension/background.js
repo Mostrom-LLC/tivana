@@ -172,11 +172,67 @@ async function handleCdpCommand(msg) {
     return;
   }
 
-  // Special case: Page.navigate — use chrome.tabs.update instead of CDP
+  // Special case: Page.navigate — use chrome.tabs.update + re-attach debugger
   // because CDP navigation detaches the debugger in extension mode
   if (method === "Page.navigate" && params && params.url) {
     try {
+      const oldInfo = attachedTabs.get(targetTabId);
+      const oldSessionId = oldInfo ? oldInfo.sessionId : null;
+      
       await chrome.tabs.update(targetTabId, { url: params.url });
+      
+      // Wait for the page to finish loading
+      await new Promise((resolve) => {
+        const onUpdated = (tabId, changeInfo) => {
+          if (tabId === targetTabId && changeInfo.status === "complete") {
+            chrome.tabs.onUpdated.removeListener(onUpdated);
+            resolve();
+          }
+        };
+        chrome.tabs.onUpdated.addListener(onUpdated);
+        // Safety timeout — don't wait forever
+        setTimeout(() => {
+          chrome.tabs.onUpdated.removeListener(onUpdated);
+          resolve();
+        }, 15000);
+      });
+      
+      // Re-attach debugger if it was detached during navigation
+      if (!attachedTabs.has(targetTabId)) {
+        try {
+          await chrome.debugger.attach({ tabId: targetTabId }, "1.3");
+          const tab = await chrome.tabs.get(targetTabId);
+          const targets = await chrome.debugger.getTargets();
+          const target = targets.find(t => t.tabId === targetTabId);
+          const targetId = target ? target.id : `tab-${targetTabId}`;
+          
+          const info = {
+            tabId: targetTabId,
+            targetId,
+            sessionId: oldSessionId || `tivana-tab-${++sessionCounter}`,
+            url: tab.url || params.url,
+            title: tab.title || "",
+          };
+          attachedTabs.set(targetTabId, info);
+          persistState();
+          updateBadge();
+          
+          // Re-enable required CDP domains
+          try { await chrome.debugger.sendCommand({ tabId: targetTabId }, "Runtime.enable"); } catch {}
+          try { await chrome.debugger.sendCommand({ tabId: targetTabId }, "Page.enable"); } catch {}
+          try { await chrome.debugger.sendCommand({ tabId: targetTabId }, "DOM.enable"); } catch {}
+          
+          // Notify runtime of re-attachment
+          wsSend({
+            method: "tab.attached",
+            params: info,
+          });
+        } catch (reattachErr) {
+          // Debugger re-attach failed — notify but don't error the navigate
+          console.warn("Failed to re-attach debugger after navigate:", reattachErr);
+        }
+      }
+      
       wsSend({ id: msg.id, result: { frameId: "main", url: params.url } });
     } catch (e) {
       wsSend({ id: msg.id, error: e.message || String(e) });
