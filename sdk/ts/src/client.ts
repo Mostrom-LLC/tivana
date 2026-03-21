@@ -416,6 +416,7 @@ export class TivanaClient {
    * @returns Extension tab info including the extensionSessionId to use for commands.
    */
   async connectExtension(extensionSessionId?: string): Promise<{
+    sessionId: string;
     extensionSessionId: string;
     tabId: number;
     targetId: string;
@@ -423,9 +424,13 @@ export class TivanaClient {
     title: string;
     connected: boolean;
   }> {
-    return this.request("session.fromExtension", {
+    const result = await this.request("session.fromExtension", {
       ...(extensionSessionId ? { extensionSessionId } : {}),
     });
+    if (result.sessionId) {
+      this.sessionId = result.sessionId;
+    }
+    return result;
   }
 
   /**

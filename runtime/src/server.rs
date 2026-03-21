@@ -463,6 +463,11 @@ impl Server {
             "extension.hello" => {
                 info!("Extension handshake received");
             }
+            "tab.error" => {
+                if let Some(params) = msg.get("params") {
+                    warn!("Extension tab error: {:?}", params);
+                }
+            }
             "pong" => {
                 // Keepalive response, nothing to do
             }
@@ -487,6 +492,19 @@ impl Server {
     /// Route request to appropriate handler
     async fn route_request(&self, request: crate::protocol::RequestMessage) -> ResponseMessage {
         let id = request.id.clone();
+
+        // Check if this request targets an extension-backed session
+        let maybe_session_id = request.session_id.as_deref()
+            .or_else(|| request.params.get("sessionId").and_then(|v| v.as_str()));
+        if let Some(session_id) = maybe_session_id {
+            if self.extension_manager.is_extension_session(session_id).await {
+                let ext_result = self.route_extension_request(&request).await;
+                return match ext_result {
+                    Ok(data) => ResponseMessage::success(id, data),
+                    Err(e) => ResponseMessage::error(id, e),
+                };
+            }
+        }
 
         let result = match request.method.as_str() {
             // Session methods
@@ -831,6 +849,189 @@ impl Server {
         Ok(closed)
     }
 
+    // Extension-backed session routing
+    async fn route_extension_request(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = request.session_id.as_deref()
+            .or_else(|| request.params.get("sessionId").and_then(|v| v.as_str()))
+            .ok_or_else(|| ProtocolError::missing_field("sessionId"))?;
+
+        match request.method.as_str() {
+            "perceive.pageState" => {
+                let state = self.extension_manager.page_state(session_id).await
+                    .map_err(|e| ProtocolError::internal(e))?;
+                Ok(state)
+            }
+            "perceive.evaluate" => {
+                let expression = request.params.get("expression")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ProtocolError::missing_field("expression"))?;
+                let result = self.extension_manager.evaluate(session_id, expression).await
+                    .map_err(|e| ProtocolError::internal(e))?;
+                // Extract the value from Runtime.evaluate result
+                if let Some(val) = result.get("result").and_then(|r| r.get("value")) {
+                    Ok(serde_json::json!({ "result": val }))
+                } else {
+                    Ok(serde_json::json!({ "result": result }))
+                }
+            }
+            "perceive.evaluateVoid" => {
+                let expression = request.params.get("expression")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ProtocolError::missing_field("expression"))?;
+                self.extension_manager.evaluate(session_id, expression).await
+                    .map_err(|e| ProtocolError::internal(e))?;
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            "perceive.elements" => {
+                // Run the perception script via evaluate
+                let result = self.extension_manager.evaluate(session_id, 
+                    &crate::perceive::elements_script()
+                ).await.map_err(|e| ProtocolError::internal(e))?;
+                if let Some(val) = result.get("result").and_then(|r| r.get("value")) {
+                    if let Some(s) = val.as_str() {
+                        let parsed: serde_json::Value = serde_json::from_str(s)
+                            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+                        return Ok(parsed);
+                    }
+                    return Ok(val.clone());
+                }
+                Ok(serde_json::json!([]))
+            }
+            "perceive.text" | "perceive.textContent" => {
+                let result = self.extension_manager.evaluate(session_id, "document.body?.innerText || ''").await
+                    .map_err(|e| ProtocolError::internal(e))?;
+                if let Some(val) = result.get("result").and_then(|r| r.get("value")) {
+                    Ok(serde_json::json!({ "text": val }))
+                } else {
+                    Ok(serde_json::json!({ "text": "" }))
+                }
+            }
+            "act.navigate" | "browser.navigate" => {
+                let url = request.params.get("url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ProtocolError::missing_field("url"))?;
+                let result = self.extension_manager.navigate(session_id, url).await
+                    .map_err(|e| ProtocolError::internal(e))?;
+                // Wait for navigation
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let state = self.extension_manager.page_state(session_id).await
+                    .map_err(|e| ProtocolError::internal(e))?;
+                Ok(state)
+            }
+            "act.click" => {
+                let target = request.params.get("target")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| request.params.get("elementId").and_then(|v| v.as_str()));
+                
+                if let Some(target) = target {
+                    // Resolve element bounds via JS, then click
+                    let script = format!(
+                        r#"(function() {{
+                            var el = document.querySelector('[data-tivana-id="{}"]');
+                            if (!el) {{
+                                // Try by element ID prefix (e.g. "e5")
+                                var id = '{}';
+                                var allEls = document.querySelectorAll('[data-tivana-id]');
+                                for (var e of allEls) {{
+                                    if (e.getAttribute('data-tivana-id') === id) {{ el = e; break; }}
+                                }}
+                            }}
+                            if (!el) return JSON.stringify({{error: 'Element not found'}});
+                            el.scrollIntoView({{block: 'center'}});
+                            var rect = el.getBoundingClientRect();
+                            return JSON.stringify({{x: rect.x + rect.width/2, y: rect.y + rect.height/2}});
+                        }})()"#,
+                        target, target
+                    );
+                    let result = self.extension_manager.evaluate(session_id, &script).await
+                        .map_err(|e| ProtocolError::internal(e))?;
+                    
+                    if let Some(val) = result.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()) {
+                        let coords: serde_json::Value = serde_json::from_str(val)
+                            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+                        if coords.get("error").is_some() {
+                            return Err(ProtocolError::new(
+                                crate::error::ErrorCode::ActionFailed,
+                                format!("Click failed: {}", coords["error"]),
+                            ));
+                        }
+                        let x = coords["x"].as_f64().unwrap_or(0.0);
+                        let y = coords["y"].as_f64().unwrap_or(0.0);
+                        self.extension_manager.click(session_id, x, y).await
+                            .map_err(|e| ProtocolError::internal(e))?;
+                        return Ok(serde_json::json!({ "clicked": true }));
+                    }
+                }
+                
+                // Fallback: click by coordinates
+                let x = request.params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y = request.params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                self.extension_manager.click(session_id, x, y).await
+                    .map_err(|e| ProtocolError::internal(e))?;
+                Ok(serde_json::json!({ "clicked": true }))
+            }
+            "act.type" => {
+                let text = request.params.get("text")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ProtocolError::missing_field("text"))?;
+                
+                // Click target first if specified
+                if let Some(target) = request.params.get("target").and_then(|v| v.as_str()) {
+                    // Focus and click the target element via JS
+                    let script = format!(
+                        r#"(function() {{
+                            var el = document.querySelector('[data-tivana-id="{}"]');
+                            if (el) {{ el.scrollIntoView({{block:'center'}}); el.focus(); el.click(); return 'ok'; }}
+                            return 'not found';
+                        }})()"#,
+                        target
+                    );
+                    self.extension_manager.evaluate(session_id, &script).await
+                        .map_err(|e| ProtocolError::internal(e))?;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                
+                self.extension_manager.type_text(session_id, text).await
+                    .map_err(|e| ProtocolError::internal(e))?;
+                Ok(serde_json::json!({ "typed": true }))
+            }
+            "act.scroll" => {
+                let ext_session_id = self.extension_manager.get_extension_session_id(session_id).await
+                    .ok_or_else(|| ProtocolError::internal("No extension session mapping".to_string()))?;
+                let dx = request.params.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let dy = request.params.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(300.0);
+                self.extension_manager.send_cdp_command(&ext_session_id, "Input.dispatchMouseEvent", serde_json::json!({
+                    "type": "mouseWheel",
+                    "x": 400, "y": 400,
+                    "deltaX": dx, "deltaY": dy,
+                })).await.map_err(|e| ProtocolError::internal(e))?;
+                Ok(serde_json::json!({ "scrolled": true }))
+            }
+            "perceive.screenshot" | "screenshot.capture" => {
+                let ext_session_id = self.extension_manager.get_extension_session_id(session_id).await
+                    .ok_or_else(|| ProtocolError::internal("No extension session mapping".to_string()))?;
+                let result = self.extension_manager.send_cdp_command(&ext_session_id, "Page.captureScreenshot", serde_json::json!({
+                    "format": "png",
+                })).await.map_err(|e| ProtocolError::internal(e))?;
+                Ok(result)
+            }
+            "session.close" => {
+                // Just remove the mapping, don't close the tab
+                Ok(serde_json::json!({ "closed": true }))
+            }
+            _ => {
+                // For unhandled methods, try running them as evaluate if they look like JS
+                Err(ProtocolError::new(
+                    crate::error::ErrorCode::UnknownMethod,
+                    format!("Method '{}' not yet supported for extension sessions", request.method),
+                ))
+            }
+        }
+    }
+
     // Extension handlers
 
     async fn handle_session_from_extension(
@@ -863,7 +1064,22 @@ impl Server {
             tabs.into_iter().next().unwrap()
         };
 
+        // Create a Tivana session ID and map it to the extension session
+        let session_id = uuid::Uuid::new_v4().to_string();
+        self.extension_manager.register_session_mapping(
+            &session_id,
+            &tab.session_id,
+        ).await;
+
+        info!(
+            session_id = %session_id,
+            extension_session = %tab.session_id,
+            url = %tab.url,
+            "Created extension-backed session"
+        );
+
         Ok(serde_json::json!({
+            "sessionId": session_id,
             "extensionSessionId": tab.session_id,
             "tabId": tab.tab_id,
             "targetId": tab.target_id,

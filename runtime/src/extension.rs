@@ -47,6 +47,9 @@ pub struct ExtensionManager {
 
     /// Counter for CDP request IDs
     id_counter: Arc<Mutex<u64>>,
+
+    /// Tivana session ID → extension session ID mapping
+    session_map: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl ExtensionManager {
@@ -56,6 +59,7 @@ impl ExtensionManager {
             ws_tx: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             id_counter: Arc::new(Mutex::new(0)),
+            session_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -210,6 +214,147 @@ impl ExtensionManager {
     /// Check if the extension is connected
     pub async fn is_connected(&self) -> bool {
         self.ws_tx.lock().await.is_some()
+    }
+
+    /// Register a mapping from Tivana session ID to extension session ID
+    pub async fn register_session_mapping(&self, tivana_id: &str, extension_id: &str) {
+        let mut map = self.session_map.write().await;
+        map.insert(tivana_id.to_string(), extension_id.to_string());
+    }
+
+    /// Check if a Tivana session ID is backed by an extension tab
+    pub async fn is_extension_session(&self, tivana_id: &str) -> bool {
+        let map = self.session_map.read().await;
+        map.contains_key(tivana_id)
+    }
+
+    /// Get extension session ID for a Tivana session
+    pub async fn get_extension_session_id(&self, tivana_id: &str) -> Option<String> {
+        let map = self.session_map.read().await;
+        map.get(tivana_id).cloned()
+    }
+
+    /// Evaluate JavaScript in the extension tab
+    pub async fn evaluate(&self, tivana_session_id: &str, expression: &str) -> Result<serde_json::Value, String> {
+        let ext_session_id = self.get_extension_session_id(tivana_session_id).await
+            .ok_or_else(|| "No extension session mapping found".to_string())?;
+
+        self.send_cdp_command(
+            &ext_session_id,
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": expression,
+                "returnByValue": true,
+                "awaitPromise": true,
+            }),
+        ).await
+    }
+
+    /// Navigate the extension tab
+    pub async fn navigate(&self, tivana_session_id: &str, url: &str) -> Result<serde_json::Value, String> {
+        let ext_session_id = self.get_extension_session_id(tivana_session_id).await
+            .ok_or_else(|| "No extension session mapping found".to_string())?;
+
+        self.send_cdp_command(
+            &ext_session_id,
+            "Page.navigate",
+            serde_json::json!({ "url": url }),
+        ).await
+    }
+
+    /// Get page state from extension tab
+    pub async fn page_state(&self, tivana_session_id: &str) -> Result<serde_json::Value, String> {
+        let ext_session_id = self.get_extension_session_id(tivana_session_id).await
+            .ok_or_else(|| "No extension session mapping found".to_string())?;
+
+        // Get URL and title via JS
+        let result = self.send_cdp_command(
+            &ext_session_id,
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": "JSON.stringify({url: location.href, title: document.title, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight, scrollX: window.scrollX, scrollY: window.scrollY})",
+                "returnByValue": true,
+            }),
+        ).await?;
+
+        // Parse the nested result
+        if let Some(value) = result.get("result").and_then(|r| r.get("value")) {
+            if let Some(s) = value.as_str() {
+                return serde_json::from_str(s).map_err(|e| e.to_string());
+            }
+            return Ok(value.clone());
+        }
+        Ok(result)
+    }
+
+    /// Click at coordinates in extension tab
+    pub async fn click(&self, tivana_session_id: &str, x: f64, y: f64) -> Result<serde_json::Value, String> {
+        let ext_session_id = self.get_extension_session_id(tivana_session_id).await
+            .ok_or_else(|| "No extension session mapping found".to_string())?;
+
+        // Mouse pressed
+        self.send_cdp_command(
+            &ext_session_id,
+            "Input.dispatchMouseEvent",
+            serde_json::json!({
+                "type": "mousePressed",
+                "x": x, "y": y,
+                "button": "left",
+                "clickCount": 1,
+            }),
+        ).await?;
+
+        // Mouse released
+        self.send_cdp_command(
+            &ext_session_id,
+            "Input.dispatchMouseEvent",
+            serde_json::json!({
+                "type": "mouseReleased",
+                "x": x, "y": y,
+                "button": "left",
+                "clickCount": 1,
+            }),
+        ).await
+    }
+
+    /// Type text in extension tab
+    pub async fn type_text(&self, tivana_session_id: &str, text: &str) -> Result<(), String> {
+        let ext_session_id = self.get_extension_session_id(tivana_session_id).await
+            .ok_or_else(|| "No extension session mapping found".to_string())?;
+
+        for ch in text.chars() {
+            // RawKeyDown
+            self.send_cdp_command(
+                &ext_session_id,
+                "Input.dispatchKeyEvent",
+                serde_json::json!({
+                    "type": "rawKeyDown",
+                    "key": ch.to_string(),
+                    "text": ch.to_string(),
+                }),
+            ).await?;
+
+            // Char
+            self.send_cdp_command(
+                &ext_session_id,
+                "Input.dispatchKeyEvent",
+                serde_json::json!({
+                    "type": "char",
+                    "text": ch.to_string(),
+                }),
+            ).await?;
+
+            // KeyUp
+            self.send_cdp_command(
+                &ext_session_id,
+                "Input.dispatchKeyEvent",
+                serde_json::json!({
+                    "type": "keyUp",
+                    "key": ch.to_string(),
+                }),
+            ).await?;
+        }
+        Ok(())
     }
 
     /// Send a CDP command through the extension and wait for the response

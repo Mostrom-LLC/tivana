@@ -752,6 +752,56 @@ impl Perceiver {
         Ok(elements)
     }
 
+}
+
+/// Returns the JavaScript source for the elements perception script.
+/// Used by extension mode to run the same logic via CDP Runtime.evaluate.
+pub fn elements_script() -> String {
+    // Same script as Perceiver::elements, but wrapped to return JSON string
+    r#"JSON.stringify((() => {
+            const elements = [];
+            if (!window.__tivana_element_counter) {
+                window.__tivana_element_counter = 1;
+                window.__tivana_element_map = new WeakMap();
+            }
+            const getStableId = (el) => {
+                let id = window.__tivana_element_map.get(el);
+                if (!id) { id = 'e' + (window.__tivana_element_counter++); window.__tivana_element_map.set(el, id); }
+                el.setAttribute('data-tivana-id', id);
+                return id;
+            };
+            const selector = ['a[href]','button','input','select','textarea','[role="button"]','[role="link"]','[role="checkbox"]','[role="radio"]','[role="menuitem"]','[role="tab"]','[role="option"]','[role="switch"]','[role="slider"]','[role="spinbutton"]','[role="searchbox"]','[role="textbox"]','[role="combobox"]','[tabindex]:not([tabindex="-1"])','[contenteditable="true"]'].join(', ');
+            for (const el of document.querySelectorAll(selector)) {
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 && rect.height === 0) continue;
+                let role = el.getAttribute('role') || el.tagName.toLowerCase();
+                if (role === 'input') role = el.type || 'text';
+                let name = el.getAttribute('aria-label');
+                if (!name) { const lblBy = el.getAttribute('aria-labelledby'); if (lblBy) name = lblBy.split(/\s+/).map(id => document.getElementById(id)?.textContent?.trim()).filter(Boolean).join(' '); }
+                if (!name && el.id) { const l = document.querySelector('label[for="'+CSS.escape(el.id)+'"]'); if (l) name = l.textContent?.trim()?.slice(0,100); }
+                if (!name) { const p = el.closest('label'); if (p) { const c = p.cloneNode(true); c.querySelectorAll('input,select,textarea').forEach(x=>x.remove()); name = c.textContent?.trim()?.slice(0,100); } }
+                if (!name && (el.type==='radio'||el.type==='checkbox')) { let s = el.nextSibling; while(s) { if(s.nodeType===3 && s.textContent?.trim()) { name=s.textContent.trim().slice(0,100); break; } if(s.nodeType===1){name=s.textContent?.trim()?.slice(0,100); break;} s=s.nextSibling; } }
+                if (!name) name = el.getAttribute('title');
+                if (!name) name = el.getAttribute('placeholder');
+                if (!name) { const inner = el.innerText?.trim()?.slice(0,100); if (inner) name = inner; }
+                if (!name && el.value) name = el.value;
+                let value = (el.value !== undefined && el.value !== '') ? el.value : null;
+                elements.push({
+                    id: getStableId(el), role, name, value,
+                    bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                    focused: document.activeElement === el,
+                    enabled: !el.disabled,
+                    checked: (el.type==='checkbox'||el.type==='radio') ? el.checked : undefined,
+                    required: el.required || undefined,
+                });
+            }
+            return elements;
+        })())"#.to_string()
+}
+
+impl Perceiver {
     /// Get full accessibility tree snapshot
     pub async fn accessibility_snapshot(
         page: &Arc<PageHandle>,

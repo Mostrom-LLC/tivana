@@ -229,7 +229,12 @@ async function attachTab(tabId) {
     // Notify Tivana
     wsSend({ method: "tab.attached", params: info });
   } catch (e) {
-    console.error("[tivana] Failed to attach tab:", e);
+    console.error("[tivana] Failed to attach tab:", e.message || e);
+    // Show error badge briefly so user knows something went wrong
+    setBadge("!", "#ef4444");
+    setTimeout(() => updateBadge(), 3000);
+    // Send error to runtime for debugging
+    wsSend({ method: "tab.error", params: { tabId, error: String(e.message || e) } });
   } finally {
     operationLocks.delete(tabId);
   }
