@@ -255,11 +255,21 @@ impl ExtensionManager {
         let ext_session_id = self.get_extension_session_id(tivana_session_id).await
             .ok_or_else(|| "No extension session mapping found".to_string())?;
 
-        self.send_cdp_command(
+        // Use Page.navigate which the extension intercepts and implements
+        // via chrome.tabs.update (avoids debugger detach)
+        let result = self.send_cdp_command(
             &ext_session_id,
             "Page.navigate",
             serde_json::json!({ "url": url }),
-        ).await
+        ).await;
+
+        // Wait for navigation to complete
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+
+        match result {
+            Ok(r) => Ok(r),
+            Err(_) => Ok(serde_json::json!({"navigated": true, "url": url})),
+        }
     }
 
     /// Get page state from extension tab

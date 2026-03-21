@@ -172,12 +172,24 @@ async function handleCdpCommand(msg) {
     return;
   }
 
+  // Special case: Page.navigate — use chrome.tabs.update instead of CDP
+  // because CDP navigation detaches the debugger in extension mode
+  if (method === "Page.navigate" && params && params.url) {
+    try {
+      await chrome.tabs.update(targetTabId, { url: params.url });
+      wsSend({ id: msg.id, result: { frameId: "main", url: params.url } });
+    } catch (e) {
+      wsSend({ id: msg.id, error: e.message || String(e) });
+    }
+    return;
+  }
+
   try {
-    const result = await chrome.debugger.sendCommand(
-      { tabId: targetTabId },
-      method,
-      params || {}
-    );
+    // Add a timeout to prevent hanging on navigation-triggering commands
+    const result = await Promise.race([
+      chrome.debugger.sendCommand({ tabId: targetTabId }, method, params || {}),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("CDP command timeout (25s)")), 25000)),
+    ]);
     wsSend({ id: msg.id, result: result || {} });
   } catch (e) {
     wsSend({ id: msg.id, error: e.message || String(e) });
