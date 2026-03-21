@@ -814,6 +814,179 @@ impl BrowserManager {
         info!("Connected to existing Chrome instance successfully");
         Ok(handle)
     }
+
+    /// Launch Chrome using the user's default browser profile.
+    /// This quits any running Chrome, then relaunches with --remote-debugging-port
+    /// but WITHOUT --user-data-dir, so Chrome uses its default profile
+    /// (~/Library/Application Support/Google/Chrome on macOS).
+    /// This gives the highest reCAPTCHA trust score since the browser has
+    /// real cookies, login sessions, and browsing history.
+    pub async fn launch_default_browser(
+        &self,
+        debug_port: u16,
+    ) -> Result<BrowserHandle, TivanaError> {
+        info!(port = debug_port, "Launching Chrome with default browser profile");
+
+        // Step 1: Check if Chrome is already running with debugging on this port
+        let already_running = reqwest::get(format!("http://127.0.0.1:{}/json/version", debug_port))
+            .await
+            .is_ok();
+
+        if already_running {
+            info!("Chrome already running with debugging on port {} — connecting", debug_port);
+            return self.connect_existing(&debug_port.to_string()).await;
+        }
+
+        // Step 2: Gracefully quit any running Chrome
+        info!("Quitting existing Chrome instances...");
+        #[cfg(target_os = "macos")]
+        {
+            // Check if Chrome is already running with debugging on this port
+            if reqwest::get(format!("http://127.0.0.1:{}/json/version", debug_port))
+                .await
+                .is_ok()
+            {
+                info!("Chrome already has debugging on port {} — connecting directly", debug_port);
+                return self.connect_existing(&debug_port.to_string()).await;
+            }
+
+            // Quit Chrome gracefully via AppleScript
+            let quit_result = tokio::process::Command::new("osascript")
+                .args(["-e", "tell application \"Google Chrome\" to quit"])
+                .output()
+                .await;
+            match quit_result {
+                Ok(output) if output.status.success() => {
+                    info!("Chrome quit requested, waiting for process to exit...");
+                }
+                _ => {
+                    info!("No running Chrome to quit (or quit failed)");
+                }
+            }
+            
+            // Wait for ALL Chrome processes to exit (renderer, helper, gpu, etc.)
+            for i in 0..40 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let check = tokio::process::Command::new("pgrep")
+                    .args(["-f", "Google Chrome.app"])
+                    .output()
+                    .await;
+                if let Ok(output) = check {
+                    if !output.status.success() {
+                        info!(attempt = i + 1, "All Chrome processes exited");
+                        break;
+                    }
+                }
+                if i == 20 {
+                    // Force kill after 10 seconds
+                    info!("Force killing Chrome processes...");
+                    let _ = tokio::process::Command::new("pkill")
+                        .args(["-9", "-f", "Google Chrome"])
+                        .output()
+                        .await;
+                }
+                if i == 39 {
+                    info!("Chrome processes still running after 20s, proceeding anyway");
+                }
+            }
+            
+            // Extra grace period for file locks to release
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            // On Linux/Windows, try pkill
+            let _ = tokio::process::Command::new("pkill")
+                .args(["-f", "chrome"])
+                .output()
+                .await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        // Step 3: Launch Chrome with a persistent profile at ~/.tivana/chrome-profile.
+        // Chrome requires --user-data-dir for --remote-debugging-port to work.
+        // macOS Keychain encryption prevents sharing cookies across profiles.
+        // Users log in once and the session persists across Tivana restarts.
+        let chrome_path = self.find_chrome_path()?;
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        let profile_dir = home.join(".tivana").join("chrome-profile");
+        
+        if !profile_dir.exists() {
+            std::fs::create_dir_all(&profile_dir).map_err(|e| {
+                TivanaError::Browser(format!("Failed to create profile dir: {}", e))
+            })?;
+            info!(profile_dir = %profile_dir.display(), "Created persistent Chrome profile");
+        } else {
+            info!(profile_dir = %profile_dir.display(), "Using existing persistent Chrome profile");
+        }
+
+        info!(path = %chrome_path.display(), "Launching Chrome with persistent Tivana profile");
+
+        let mut cmd = tokio::process::Command::new(&chrome_path);
+        cmd.arg(format!("--remote-debugging-port={}", debug_port))
+            .arg(format!("--user-data-dir={}", profile_dir.display()))
+            .arg("--no-first-run")
+            .arg("--window-size=1440,900")
+            .arg("about:blank")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        cmd.spawn().map_err(|e| {
+            TivanaError::Browser(format!("Failed to launch Chrome: {}", e))
+        })?;
+
+        // Step 4: Wait for Chrome to be ready (default profile can take longer)
+        info!("Waiting for Chrome to start...");
+        for i in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if let Ok(resp) = reqwest::get(format!("http://127.0.0.1:{}/json/version", debug_port)).await {
+                if resp.status().is_success() {
+                    info!(attempt = i + 1, "Chrome is ready");
+                    // Extra wait for profile to fully load
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    break;
+                }
+            }
+            if i == 39 {
+                return Err(TivanaError::Browser(
+                    "Chrome failed to start within 20 seconds".to_string(),
+                ));
+            }
+        }
+
+        // Step 5: Connect to the newly launched Chrome
+        self.connect_existing(&debug_port.to_string()).await
+    }
+
+    /// Find the Chrome executable path
+    fn find_chrome_path(&self) -> Result<PathBuf, TivanaError> {
+        if let Some(ref path) = self.default_config.chrome_path {
+            return Ok(path.clone());
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let path = PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            for name in &["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"] {
+                if let Ok(output) = std::process::Command::new("which").arg(name).output() {
+                    if output.status.success() {
+                        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        return Ok(PathBuf::from(path));
+                    }
+                }
+            }
+        }
+
+        Err(TivanaError::Browser("Could not find Chrome. Install Chrome or pass --chrome-path".to_string()))
+    }
 }
 
 impl Default for BrowserManager {

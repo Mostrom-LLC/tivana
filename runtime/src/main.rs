@@ -44,7 +44,9 @@ async fn main() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION"),
         args.port
     );
-    if let Some(ref target) = args.connect {
+    if args.use_default_browser {
+        info!("Browser mode: default browser profile (highest trust)");
+    } else if let Some(ref target) = args.connect {
         info!("Browser mode: connect to existing Chrome at {}", target);
     } else {
         info!(

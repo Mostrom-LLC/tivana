@@ -47,6 +47,9 @@ pub struct Server {
     /// Connect to existing Chrome instance (port or ws:// URL)
     connect_target: Option<String>,
 
+    /// Use the default browser profile (highest reCAPTCHA trust)
+    use_default_browser: bool,
+
     /// Shutdown signal sender
     shutdown_tx: broadcast::Sender<()>,
 }
@@ -74,13 +77,14 @@ impl Server {
             sessions: SessionRegistry::new(),
             browser_manager: BrowserManager::new(browser_config),
             connect_target: args.connect.clone(),
+            use_default_browser: args.use_default_browser,
             shutdown_tx,
         })
     }
 
-    /// Attempt to reattach persisted sessions (only in --connect mode)
+    /// Attempt to reattach persisted sessions (only in --connect or --use-default-browser mode)
     async fn reattach_sessions(&self) {
-        if self.connect_target.is_none() {
+        if self.connect_target.is_none() && !self.use_default_browser {
             return;
         }
 
@@ -94,7 +98,7 @@ impl Server {
             "Attempting to reattach persisted sessions"
         );
 
-        let connect_target = self.connect_target.as_ref().unwrap();
+        let connect_target = self.connect_target.as_deref().unwrap_or("9222");
 
         for ps in &persisted {
             // Try to connect to Chrome and verify the targets still exist
@@ -605,8 +609,13 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        // Either connect to existing Chrome or launch a new one
-        let browser = if let Some(ref target) = self.connect_target {
+        // Either connect to existing Chrome, use default browser, or launch a new one
+        let browser = if self.use_default_browser {
+            self.browser_manager
+                .launch_default_browser(9222)
+                .await
+                .map_err(|e| ProtocolError::browser_launch_failed(e.to_string()))?
+        } else if let Some(ref target) = self.connect_target {
             self.browser_manager
                 .connect_existing(target)
                 .await

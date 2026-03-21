@@ -38,6 +38,12 @@ pub struct Args {
     ///   --user-data-dir "$HOME/Library/Application Support/Google/Chrome"
     #[arg(long)]
     pub user_data_dir: Option<PathBuf>,
+
+    /// Use your default browser profile instead of an isolated one.
+    /// Quits any running Chrome, relaunches with debugging enabled using your
+    /// real profile (cookies, logins, history). Gives highest reCAPTCHA trust.
+    #[arg(long)]
+    pub use_default_browser: bool,
 }
 
 impl Args {
