@@ -404,6 +404,47 @@ export class TivanaClient {
   }
 
   //===========================================================================
+  // Extension API
+  //===========================================================================
+
+  /**
+   * Create a session from a Chrome extension-attached tab.
+   * The extension must be connected to the runtime and have at least one tab attached.
+   *
+   * @param extensionSessionId - Optional specific extension session ID to use.
+   *   If omitted, uses the first available extension tab.
+   * @returns Extension tab info including the extensionSessionId to use for commands.
+   */
+  async connectExtension(extensionSessionId?: string): Promise<{
+    extensionSessionId: string;
+    tabId: number;
+    targetId: string;
+    url: string;
+    title: string;
+    connected: boolean;
+  }> {
+    return this.request("session.fromExtension", {
+      ...(extensionSessionId ? { extensionSessionId } : {}),
+    });
+  }
+
+  /**
+   * List all tabs currently attached via the Chrome extension.
+   */
+  async extensionTabs(): Promise<{
+    tabs: Array<{
+      tabId: number;
+      targetId: string;
+      sessionId: string;
+      url: string;
+      title: string;
+    }>;
+    connected: boolean;
+  }> {
+    return this.request("extension.tabs");
+  }
+
+  //===========================================================================
   // Tab Management API
   //===========================================================================
 

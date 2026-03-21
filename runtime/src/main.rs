@@ -11,6 +11,7 @@ mod browser;
 mod captcha;
 mod cli;
 mod error;
+mod extension;
 mod network;
 mod perceive;
 mod persistence;

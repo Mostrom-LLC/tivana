@@ -23,6 +23,7 @@ use crate::browser::{BrowserLaunchConfig, BrowserManager};
 use crate::captcha::CaptchaSolver;
 use crate::cli::Args;
 use crate::error::{ProtocolError, TivanaError};
+use crate::extension::{self, ExtensionManager};
 use crate::network::NetworkManager;
 use crate::perceive::{setup_mutation_observer, stop_mutation_observer, Perceiver, ScreenshotOptions};
 use crate::persistence;
@@ -52,6 +53,9 @@ pub struct Server {
 
     /// Shutdown signal sender
     shutdown_tx: broadcast::Sender<()>,
+
+    /// Extension manager for Chrome extension bridge connections
+    extension_manager: ExtensionManager,
 }
 
 impl Server {
@@ -79,6 +83,7 @@ impl Server {
             connect_target: args.connect.clone(),
             use_default_browser: args.use_default_browser,
             shutdown_tx,
+            extension_manager: ExtensionManager::new(),
         })
     }
 
@@ -285,32 +290,49 @@ impl Server {
             }
         });
 
+        // Track whether this connection is an extension
+        let mut is_extension_conn = false;
+
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
                     debug!(peer = %addr, len = text.len(), "Received message");
-                    let response = self.handle_message(&text).await;
-                    let response_json = serialize_outbound(&response)?;
-                    if outbound_tx.send(response_json).await.is_err() {
-                        break;
+
+                    // Detect extension connections on first message
+                    if !is_extension_conn && extension::is_extension_message(&text) {
+                        info!(peer = %addr, "Detected Chrome extension connection");
+                        is_extension_conn = true;
+                        self.extension_manager.set_connection(outbound_tx.clone()).await;
                     }
 
-                    // If this was a mutations start request, kick off event pushing
-                    if let Ok(req) = parse_request(&text) {
-                        if req.method == "perceive.mutations" {
-                            let sid = req.session_id.clone().or_else(|| {
-                                req.params
-                                    .get("sessionId")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from)
-                            });
+                    if is_extension_conn {
+                        // Handle extension protocol messages
+                        self.handle_extension_message(&text).await;
+                    } else {
+                        // Normal SDK client message
+                        let response = self.handle_message(&text).await;
+                        let response_json = serialize_outbound(&response)?;
+                        if outbound_tx.send(response_json).await.is_err() {
+                            break;
+                        }
 
-                            if let Some(session_id) = sid {
-                                let tx = outbound_tx.clone();
-                                let sessions = self.sessions.clone();
-                                tokio::spawn(async move {
-                                    Self::push_mutation_events(sessions, session_id, tx).await;
+                        // If this was a mutations start request, kick off event pushing
+                        if let Ok(req) = parse_request(&text) {
+                            if req.method == "perceive.mutations" {
+                                let sid = req.session_id.clone().or_else(|| {
+                                    req.params
+                                        .get("sessionId")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from)
                                 });
+
+                                if let Some(session_id) = sid {
+                                    let tx = outbound_tx.clone();
+                                    let sessions = self.sessions.clone();
+                                    tokio::spawn(async move {
+                                        Self::push_mutation_events(sessions, session_id, tx).await;
+                                    });
+                                }
                             }
                         }
                     }
@@ -340,6 +362,9 @@ impl Server {
         }
 
         // Cleanup
+        if is_extension_conn {
+            self.extension_manager.clear_connection().await;
+        }
         heartbeat_task.abort();
         drop(outbound_tx);
         let _ = writer_task.await;
@@ -406,6 +431,48 @@ impl Server {
         }
     }
 
+    /// Handle a message from the Chrome extension
+    async fn handle_extension_message(&self, text: &str) {
+        let msg: serde_json::Value = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+
+        match method {
+            "tab.attached" => {
+                if let Some(params) = msg.get("params") {
+                    self.extension_manager.handle_tab_attached(params).await;
+                }
+            }
+            "tab.detached" => {
+                if let Some(params) = msg.get("params") {
+                    self.extension_manager.handle_tab_detached(params).await;
+                }
+            }
+            "tab.navigated" => {
+                if let Some(params) = msg.get("params") {
+                    self.extension_manager.handle_tab_navigated(params).await;
+                }
+            }
+            "cdp.event" => {
+                // CDP events from extension — could forward to SDK clients in the future
+                debug!("Extension CDP event: {:?}", msg.get("params"));
+            }
+            "pong" => {
+                // Keepalive response, nothing to do
+            }
+            "" => {
+                // Likely a CDP response: {id, result} or {id, error}
+                self.extension_manager.handle_cdp_response(&msg).await;
+            }
+            _ => {
+                debug!("Unknown extension message method: {}", method);
+            }
+        }
+    }
+
     /// Handle a single message and return response
     async fn handle_message(&self, text: &str) -> OutboundMessage {
         match parse_request(text) {
@@ -429,6 +496,10 @@ impl Server {
             "session.closeTab" => self.handle_session_close_tab(&request).await,
             "session.get" => self.handle_session_get(&request).await,
             "session.cleanTabs" => self.handle_session_clean_tabs(&request).await,
+
+            // Extension methods
+            "session.fromExtension" => self.handle_session_from_extension(&request).await,
+            "extension.tabs" => self.handle_extension_list_tabs().await,
 
             // Browser methods
             "browser.navigate" => self.handle_browser_navigate(&request).await,
@@ -755,6 +826,56 @@ impl Server {
         }
 
         Ok(closed)
+    }
+
+    // Extension handlers
+
+    async fn handle_session_from_extension(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        // List available extension tabs and optionally pick one by sessionId
+        let ext_session_id = request
+            .params
+            .get("extensionSessionId")
+            .and_then(|v| v.as_str());
+
+        let tabs = self.extension_manager.list_tabs().await;
+        if tabs.is_empty() {
+            return Err(ProtocolError::new(
+                crate::error::ErrorCode::BrowserDisconnected,
+                "No extension tabs available. Make sure the Chrome extension is connected and a tab is attached.",
+            ));
+        }
+
+        // Pick the requested tab, or the first one
+        let tab = if let Some(ext_sid) = ext_session_id {
+            tabs.iter()
+                .find(|t| t.session_id == ext_sid)
+                .ok_or_else(|| {
+                    ProtocolError::session_not_found(ext_sid)
+                })?
+                .clone()
+        } else {
+            tabs.into_iter().next().unwrap()
+        };
+
+        Ok(serde_json::json!({
+            "extensionSessionId": tab.session_id,
+            "tabId": tab.tab_id,
+            "targetId": tab.target_id,
+            "url": tab.url,
+            "title": tab.title,
+            "connected": self.extension_manager.is_connected().await,
+        }))
+    }
+
+    async fn handle_extension_list_tabs(&self) -> Result<serde_json::Value, ProtocolError> {
+        let tabs = self.extension_manager.list_tabs().await;
+        Ok(serde_json::json!({
+            "tabs": tabs,
+            "connected": self.extension_manager.is_connected().await,
+        }))
     }
 
     // Tab management handlers
