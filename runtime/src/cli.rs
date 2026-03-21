@@ -32,6 +32,12 @@ pub struct Args {
     /// Provide the debugging port (e.g., --connect 9222) or full WebSocket URL.
     #[arg(long)]
     pub connect: Option<String>,
+
+    /// Chrome user data directory. Defaults to a temporary profile.
+    /// Use your real Chrome profile for higher reCAPTCHA trust scores:
+    ///   --user-data-dir "$HOME/Library/Application Support/Google/Chrome"
+    #[arg(long)]
+    pub user_data_dir: Option<PathBuf>,
 }
 
 impl Args {

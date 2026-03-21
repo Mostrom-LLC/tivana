@@ -192,12 +192,33 @@ impl CaptchaSolver {
         _info: &CaptchaInfo,
         start: Instant,
     ) -> Result<CaptchaSolveResult, ProtocolError> {
-        let result: serde_json::Value = page
-            .evaluate(RECAPTCHA_EXECUTE_JS)
-            .await
-            .map_err(|e| {
-                ProtocolError::internal(format!("grecaptcha.execute() failed: {}", e))
-            })?;
+        // Timeout execute() at 10 seconds — Google's assessment can hang
+        let eval_future = page.evaluate::<serde_json::Value>(RECAPTCHA_EXECUTE_JS);
+        let result: serde_json::Value = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            eval_future,
+        )
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                return Ok(CaptchaSolveResult {
+                    solved: false,
+                    method: "execute".to_string(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(format!("grecaptcha.execute() failed: {}", e)),
+                });
+            }
+            Err(_) => {
+                info!("grecaptcha.execute() timed out after 10s");
+                return Ok(CaptchaSolveResult {
+                    solved: false,
+                    method: "execute".to_string(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some("grecaptcha.execute() timed out after 10s".to_string()),
+                });
+            }
+        };
 
         let solved = result
             .get("solved")

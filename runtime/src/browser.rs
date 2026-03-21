@@ -652,6 +652,11 @@ impl BrowserManager {
         self.default_config.headless
     }
 
+    /// Access the default browser launch configuration
+    pub fn default_config(&self) -> &BrowserLaunchConfig {
+        &self.default_config
+    }
+
     /// Launch a new browser instance
     pub async fn launch(
         &self,

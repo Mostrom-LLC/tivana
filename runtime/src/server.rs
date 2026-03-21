@@ -63,6 +63,7 @@ impl Server {
         let browser_config = BrowserLaunchConfig {
             headless: args.is_headless(),
             chrome_path: args.chrome_path.clone(),
+            user_data_dir: args.user_data_dir.clone(),
             ..Default::default()
         };
 
@@ -615,6 +616,7 @@ impl Server {
                 headless: config.headless,
                 viewport_width: config.viewport_width.unwrap_or(1440),
                 viewport_height: config.viewport_height.unwrap_or(900),
+                user_data_dir: self.browser_manager.default_config().user_data_dir.clone(),
                 ..Default::default()
             };
             self.browser_manager
@@ -1068,12 +1070,30 @@ impl Server {
             expression.to_string()
         };
 
-        let result: serde_json::Value = page
-            .evaluate::<serde_json::Value>(&js)
-            .await
-            .map_err(|e| {
-                ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, format!("Evaluate failed: {}", e))
-            })?;
+        let timeout_ms = request
+            .params
+            .get("timeoutMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30000);
+
+        let eval_future = page.evaluate::<serde_json::Value>(&js);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            eval_future,
+        )
+        .await
+        .map_err(|_| {
+            ProtocolError::new(
+                crate::error::ErrorCode::PerceptionFailed,
+                format!("Evaluate timed out after {}ms", timeout_ms),
+            )
+        })?
+        .map_err(|e| {
+            ProtocolError::new(
+                crate::error::ErrorCode::PerceptionFailed,
+                format!("Evaluate failed: {}", e),
+            )
+        })?;
 
         Ok(serde_json::json!({ "result": result }))
     }
@@ -1096,11 +1116,29 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
-        page.evaluate_void(expression)
-            .await
-            .map_err(|e| {
-                ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, format!("Evaluate failed: {}", e))
-            })?;
+        let timeout_ms = request
+            .params
+            .get("timeoutMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30000);
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            page.evaluate_void(expression),
+        )
+        .await
+        .map_err(|_| {
+            ProtocolError::new(
+                crate::error::ErrorCode::PerceptionFailed,
+                format!("EvaluateVoid timed out after {}ms", timeout_ms),
+            )
+        })?
+        .map_err(|e| {
+            ProtocolError::new(
+                crate::error::ErrorCode::PerceptionFailed,
+                format!("Evaluate failed: {}", e),
+            )
+        })?;
 
         Ok(serde_json::json!({ "success": true }))
     }
