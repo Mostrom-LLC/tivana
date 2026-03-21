@@ -13,10 +13,10 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 /// How often to send WebSocket ping frames
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// If no pong is received within this duration, consider the connection stale
-const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(300);
 
 use crate::act::{ActionTarget, Actor, BatchAction, ClickOptions, ScrollDirection, ScrollOptions, TypeOptions};
 use crate::browser::{BrowserLaunchConfig, BrowserManager};
