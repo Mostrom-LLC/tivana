@@ -1038,6 +1038,133 @@ impl Perceiver {
             height: dims.height,
         })
     }
+
+    /// Get all form fields on the page with full introspection data
+    pub async fn form_fields(page: &Arc<PageHandle>) -> Result<Vec<FormField>, TivanaError> {
+        debug!("Getting form fields");
+
+        let fields: Vec<FormField> = page
+            .evaluate(
+                r#"(() => {
+    // Ensure tivana ID counter exists
+    if (!window.__tivana_element_counter) window.__tivana_element_counter = 0;
+    if (!window.__tivana_element_map) window.__tivana_element_map = new WeakMap();
+
+    function getTivanaId(el) {
+        if (window.__tivana_element_map.has(el)) {
+            return el.getAttribute('data-tivana-id');
+        }
+        const id = 'e' + (++window.__tivana_element_counter);
+        window.__tivana_element_map.set(el, id);
+        el.setAttribute('data-tivana-id', id);
+        return id;
+    }
+
+    function computeLabel(el) {
+        // 1. aria-label
+        const ariaLabel = el.getAttribute('aria-label');
+        if (ariaLabel) return ariaLabel.trim();
+
+        // 2. aria-labelledby
+        const labelledBy = el.getAttribute('aria-labelledby');
+        if (labelledBy) {
+            const parts = labelledBy.split(/\s+/).map(id => {
+                const ref = document.getElementById(id);
+                return ref ? ref.textContent.trim() : '';
+            }).filter(Boolean);
+            if (parts.length) return parts.join(' ');
+        }
+
+        // 3. label[for]
+        const id = el.id;
+        if (id) {
+            const labelEl = document.querySelector('label[for="' + CSS.escape(id) + '"]');
+            if (labelEl) return labelEl.textContent.trim();
+        }
+
+        // 4. Parent label
+        const parentLabel = el.closest('label');
+        if (parentLabel) {
+            // Get text from label excluding the input itself
+            const clone = parentLabel.cloneNode(true);
+            const inputs = clone.querySelectorAll('input, select, textarea');
+            inputs.forEach(i => i.remove());
+            const text = clone.textContent.trim();
+            if (text) return text;
+        }
+
+        // 5. Placeholder
+        if (el.placeholder) return el.placeholder.trim();
+
+        // 6. Closest fieldset legend
+        const fieldset = el.closest('fieldset');
+        if (fieldset) {
+            const legend = fieldset.querySelector('legend');
+            if (legend) return legend.textContent.trim();
+        }
+
+        return null;
+    }
+
+    const selectors = 'input, select, textarea, [contenteditable="true"], [contenteditable=""]';
+    const elements = document.querySelectorAll(selectors);
+    const results = [];
+
+    for (const el of elements) {
+        // Skip hidden inputs
+        if (el.type === 'hidden') continue;
+
+        const tagName = el.tagName.toLowerCase();
+        const field = {
+            tivanaId: getTivanaId(el),
+            tagName: tagName,
+            type: el.type || null,
+            name: el.name || null,
+            id: el.id || null,
+            value: null,
+            required: !!el.required,
+            disabled: !!el.disabled,
+            label: computeLabel(el),
+            options: null,
+            checked: null,
+            groupName: null,
+            pattern: el.pattern || null,
+            min: el.min || null,
+            max: el.max || null,
+            visible: el.offsetWidth > 0 && el.offsetHeight > 0
+        };
+
+        // Value
+        if (tagName === 'select') {
+            field.value = el.value;
+            field.options = Array.from(el.options).map(o => ({
+                value: o.value,
+                text: o.textContent.trim(),
+                selected: o.selected
+            }));
+        } else if (el.type === 'checkbox' || el.type === 'radio') {
+            field.checked = el.checked;
+            field.value = el.value;
+            if (el.type === 'radio') {
+                field.groupName = el.name || null;
+            }
+        } else if (el.contentEditable === 'true' || el.contentEditable === '') {
+            field.value = el.textContent || null;
+        } else {
+            field.value = el.value || null;
+        }
+
+        results.push(field);
+    }
+
+    return results;
+})()"#,
+            )
+            .await?;
+
+        debug!(count = fields.len(), "Form fields found");
+        Ok(fields)
+    }
 }
 
 /// Screenshot format
@@ -1066,6 +1193,80 @@ pub struct ScreenshotOptions {
 
     /// Clip to specific region
     pub clip: Option<BoundingBox>,
+}
+
+/// A select option
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectOption {
+    pub value: String,
+    pub text: String,
+    pub selected: bool,
+}
+
+/// A form field with full introspection data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormField {
+    /// Stable tivana element ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tivana_id: Option<String>,
+
+    /// HTML tag name (input, select, textarea, div, etc.)
+    pub tag_name: String,
+
+    /// Input type (text, email, checkbox, radio, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+
+    /// Name attribute
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// ID attribute
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// Current value
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+
+    /// Whether the field is required
+    pub required: bool,
+
+    /// Whether the field is disabled
+    pub disabled: bool,
+
+    /// Computed label
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// Options for select elements
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<SelectOption>>,
+
+    /// Checked state for checkbox/radio
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
+
+    /// Radio group name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
+
+    /// Validation pattern
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+
+    /// Min value for number/range inputs
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<String>,
+
+    /// Max value for number/range inputs
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<String>,
+
+    /// Whether the field is visible
+    pub visible: bool,
 }
 
 /// Screenshot result

@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::browser::PageHandle;
 use crate::error::TivanaError;
-use crate::perceive::{BoundingBox, PageState, Perceiver};
+use crate::perceive::{BoundingBox, FormField, PageState, Perceiver};
 
 /// Maximum retries for stale element recovery
 const STALE_ELEMENT_MAX_RETRIES: u32 = 3;
@@ -349,6 +349,37 @@ pub struct FormFillResult {
 pub struct FormFieldError {
     pub field: String,
     pub error: String,
+}
+
+/// Result of a smart form fill operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartFillResult {
+    pub fields_filled: Vec<SmartFillMatch>,
+    pub fields_skipped: Vec<SmartFillSkip>,
+    pub total_fields: usize,
+    pub filled_count: usize,
+    pub duration_ms: u64,
+    pub errors: Vec<FormFieldError>,
+}
+
+/// A field that was successfully matched and filled
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartFillMatch {
+    pub tivana_id: String,
+    pub label: String,
+    pub profile_key: String,
+    pub value: String,
+}
+
+/// A field that could not be matched
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartFillSkip {
+    pub tivana_id: Option<String>,
+    pub label: Option<String>,
+    pub reason: String,
 }
 
 /// Action executor
@@ -1563,6 +1594,365 @@ impl Actor {
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
+    }
+
+    /// Smart fill a form by matching field labels to profile keys using fuzzy matching
+    pub async fn smart_fill(
+        page: &Arc<PageHandle>,
+        profile: &serde_json::Map<String, serde_json::Value>,
+        skip_recaptcha: bool,
+        mouse_pos: Option<&Arc<RwLock<(f64, f64)>>>,
+    ) -> SmartFillResult {
+        let start = std::time::Instant::now();
+        let mut fields_filled = Vec::new();
+        let mut fields_skipped = Vec::new();
+        let mut errors = Vec::new();
+
+        // Get form fields via perceive
+        let form_fields = match Perceiver::form_fields(page).await {
+            Ok(f) => f,
+            Err(e) => {
+                return SmartFillResult {
+                    fields_filled: vec![],
+                    fields_skipped: vec![],
+                    total_fields: 0,
+                    filled_count: 0,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    errors: vec![FormFieldError {
+                        field: "*".into(),
+                        error: format!("Failed to get form fields: {}", e),
+                    }],
+                };
+            }
+        };
+
+        let total_fields = form_fields.len();
+
+        for field in &form_fields {
+            // Skip invisible fields
+            if !field.visible {
+                continue;
+            }
+
+            // Skip disabled fields
+            if field.disabled {
+                continue;
+            }
+
+            let tivana_id = match &field.tivana_id {
+                Some(id) => id.clone(),
+                None => {
+                    fields_skipped.push(SmartFillSkip {
+                        tivana_id: None,
+                        label: field.label.clone(),
+                        reason: "No tivana ID".into(),
+                    });
+                    continue;
+                }
+            };
+
+            // Skip recaptcha fields if requested
+            if skip_recaptcha {
+                if let Some(ref name) = field.name {
+                    if name.to_lowercase().contains("recaptcha") {
+                        continue;
+                    }
+                }
+            }
+
+            // Compute a normalized label for matching
+            let label_str = field
+                .label
+                .as_deref()
+                .or(field.name.as_deref())
+                .or(field.id.as_deref())
+                .unwrap_or("");
+
+            let label_lower = label_str.to_lowercase();
+
+            // Try to match the label to a profile key
+            let matched_key = Self::match_label_to_profile_key(&label_lower, profile, field);
+
+            match matched_key {
+                Some((key, value)) => {
+                    let field_type = field.r#type.as_deref().unwrap_or("");
+                    let tag = field.tag_name.as_str();
+
+                    let fill_result = if tag == "select" {
+                        // For select: pick the best matching option
+                        Self::smart_fill_select(page, &tivana_id, &value, field).await
+                    } else if field_type == "radio" {
+                        // For radio: determine yes/no from value
+                        Self::smart_fill_radio(page, &tivana_id, &value, field).await
+                    } else if field_type == "checkbox" {
+                        // For checkbox: check if value is truthy
+                        let should_check = matches!(
+                            value.to_lowercase().as_str(),
+                            "true" | "yes" | "1" | "y"
+                        );
+                        let is_checked = field.checked.unwrap_or(false);
+                        if should_check != is_checked {
+                            let target = ActionTarget::element_id(&tivana_id);
+                            Self::click(page, &target, &ClickOptions::default(), mouse_pos).await
+                        } else {
+                            Ok(ActionResult::success())
+                        }
+                    } else {
+                        // Text input: click + type
+                        let target = ActionTarget::element_id(&tivana_id);
+                        Self::type_text(
+                            page,
+                            &value,
+                            Some(&target),
+                            &TypeOptions {
+                                clear_first: true,
+                                ..Default::default()
+                            },
+                            mouse_pos,
+                        )
+                        .await
+                    };
+
+                    match fill_result {
+                        Ok(_) => {
+                            fields_filled.push(SmartFillMatch {
+                                tivana_id: tivana_id.clone(),
+                                label: label_str.to_string(),
+                                profile_key: key.clone(),
+                                value,
+                            });
+                            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        }
+                        Err(e) => {
+                            errors.push(FormFieldError {
+                                field: tivana_id.clone(),
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                }
+                None => {
+                    fields_skipped.push(SmartFillSkip {
+                        tivana_id: Some(tivana_id),
+                        label: Some(label_str.to_string()),
+                        reason: "No matching profile key".into(),
+                    });
+                }
+            }
+        }
+
+        let filled_count = fields_filled.len();
+        SmartFillResult {
+            fields_filled,
+            fields_skipped,
+            total_fields,
+            filled_count,
+            duration_ms: start.elapsed().as_millis() as u64,
+            errors,
+        }
+    }
+
+    /// Match a field label to a profile key using fuzzy matching
+    fn match_label_to_profile_key(
+        label: &str,
+        profile: &serde_json::Map<String, serde_json::Value>,
+        field: &FormField,
+    ) -> Option<(String, String)> {
+        // Common label → profile key mappings (label patterns to profile keys)
+        let mappings: &[(&[&str], &str)] = &[
+            (&["first name", "first_name", "firstname", "given name", "fname"], "firstName"),
+            (&["last name", "last_name", "lastname", "surname", "family name", "lname"], "lastName"),
+            (&["full name", "full_name", "fullname", "your name"], "fullName"),
+            (&["email", "e-mail", "email address"], "email"),
+            (&["phone", "telephone", "tel", "phone number", "mobile", "cell"], "phone"),
+            (&["city", "town"], "city"),
+            (&["state", "province", "region"], "state"),
+            (&["zip", "zip code", "zipcode", "postal code", "postal", "postcode"], "zip"),
+            (&["address", "street address", "street", "address line"], "address"),
+            (&["years of experience", "years experience", "experience", "yrs experience", "years_experience"], "yearsExperience"),
+            (&["salary", "expected salary", "desired salary", "compensation", "salary expectation"], "salary"),
+            (&["linkedin", "linkedin url", "linkedin profile"], "linkedIn"),
+            (&["github", "github url", "github profile"], "github"),
+            (&["current title", "job title", "title", "position", "role"], "currentTitle"),
+            (&["current company", "company", "employer", "organization", "company name"], "currentCompany"),
+            (&["education", "degree", "school", "university", "highest education"], "education"),
+            (&["authorized", "work authorization", "authorized to work", "legally authorized", "eligible to work"], "authorized"),
+            (&["sponsorship", "visa sponsorship", "require sponsorship", "need sponsorship"], "sponsorship"),
+            (&["start date", "available start", "earliest start", "availability", "date available"], "startDate"),
+            (&["website", "portfolio", "personal website", "url"], "website"),
+            (&["cover letter", "cover_letter"], "coverLetter"),
+            (&["summary", "about", "bio", "about yourself"], "summary"),
+            (&["country", "nationality"], "country"),
+        ];
+
+        // First try: direct profile key match against label
+        for (key, value) in profile {
+            let key_lower = key.to_lowercase();
+            if label.contains(&key_lower) || key_lower.contains(label) {
+                if let Some(s) = value.as_str() {
+                    return Some((key.clone(), s.to_string()));
+                }
+                if let Some(n) = value.as_f64() {
+                    return Some((key.clone(), n.to_string()));
+                }
+                if let Some(b) = value.as_bool() {
+                    return Some((key.clone(), if b { "Yes" } else { "No" }.to_string()));
+                }
+            }
+        }
+
+        // Second try: fuzzy match via mapping table
+        for (patterns, profile_key) in mappings {
+            let matches = patterns.iter().any(|p| {
+                label.contains(p) || p.contains(label)
+            });
+
+            if matches {
+                if let Some(value) = profile.get(*profile_key) {
+                    if let Some(s) = value.as_str() {
+                        return Some((profile_key.to_string(), s.to_string()));
+                    }
+                    if let Some(n) = value.as_f64() {
+                        return Some((profile_key.to_string(), n.to_string()));
+                    }
+                    if let Some(b) = value.as_bool() {
+                        return Some((
+                            profile_key.to_string(),
+                            if b { "Yes" } else { "No" }.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Third try: match by field name/id attribute against profile keys
+        let alt_label = field.name.as_deref().or(field.id.as_deref()).unwrap_or("");
+        let alt_lower = alt_label.to_lowercase();
+        if !alt_lower.is_empty() && alt_lower != label {
+            for (key, value) in profile {
+                let key_lower = key.to_lowercase();
+                if alt_lower.contains(&key_lower) || key_lower.contains(&alt_lower) {
+                    if let Some(s) = value.as_str() {
+                        return Some((key.clone(), s.to_string()));
+                    }
+                    if let Some(n) = value.as_f64() {
+                        return Some((key.clone(), n.to_string()));
+                    }
+                    if let Some(b) = value.as_bool() {
+                        return Some((key.clone(), if b { "Yes" } else { "No" }.to_string()));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Smart fill a select element by finding the best matching option
+    async fn smart_fill_select(
+        page: &Arc<PageHandle>,
+        tivana_id: &str,
+        value: &str,
+        field: &FormField,
+    ) -> Result<ActionResult, TivanaError> {
+        let value_lower = value.to_lowercase();
+
+        // Find the best matching option
+        if let Some(ref options) = field.options {
+            let best = options.iter().find(|o| {
+                o.value.to_lowercase() == value_lower || o.text.to_lowercase() == value_lower
+            }).or_else(|| {
+                // Fuzzy: contains match
+                options.iter().find(|o| {
+                    o.text.to_lowercase().contains(&value_lower)
+                        || value_lower.contains(&o.text.to_lowercase())
+                        || o.value.to_lowercase().contains(&value_lower)
+                })
+            });
+
+            if let Some(option) = best {
+                let script = format!(
+                    r#"(() => {{
+                        const el = document.querySelector('[data-tivana-id="{}"]');
+                        if (!el) return false;
+                        el.value = {};
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        return true;
+                    }})()"#,
+                    tivana_id,
+                    serde_json::to_string(&option.value).unwrap_or_default()
+                );
+                let _: bool = page.evaluate(&script).await?;
+                return Ok(ActionResult::success());
+            }
+        }
+
+        Err(TivanaError::Browser(format!(
+            "No matching option for value: {}",
+            value
+        )))
+    }
+
+    /// Smart fill a radio button group based on yes/no value
+    async fn smart_fill_radio(
+        page: &Arc<PageHandle>,
+        tivana_id: &str,
+        value: &str,
+        _field: &FormField,
+    ) -> Result<ActionResult, TivanaError> {
+        let value_lower = value.to_lowercase();
+        let is_affirmative = matches!(
+            value_lower.as_str(),
+            "yes" | "true" | "1" | "y"
+        );
+
+        // Try to click the right radio in the group
+        let script = format!(
+            r#"(() => {{
+                const el = document.querySelector('[data-tivana-id="{}"]');
+                if (!el) return 'not_found';
+                const name = el.name;
+                if (!name) {{ el.click(); return 'clicked'; }}
+
+                // Find all radios in this group
+                const radios = document.querySelectorAll('input[type="radio"][name="' + CSS.escape(name) + '"]');
+                for (const radio of radios) {{
+                    const label = radio.closest('label')?.textContent?.trim()?.toLowerCase() || '';
+                    const val = radio.value?.toLowerCase() || '';
+                    const affirmative = label.includes('yes') || val === 'yes' || val === 'true' || val === '1';
+                    const negative = label.includes('no') || val === 'no' || val === 'false' || val === '0';
+
+                    if (({is_aff} && affirmative) || (!{is_aff} && negative)) {{
+                        radio.click();
+                        return 'clicked';
+                    }}
+                }}
+
+                // Fallback: click based on value match
+                for (const radio of radios) {{
+                    if (radio.value?.toLowerCase() === {val}) {{
+                        radio.click();
+                        return 'clicked';
+                    }}
+                }}
+
+                return 'no_match';
+            }})()"#,
+            tivana_id,
+            is_aff = is_affirmative,
+            val = serde_json::to_string(&value_lower).unwrap_or_default()
+        );
+
+        let result: String = page.evaluate(&script).await?;
+        if result == "not_found" {
+            return Err(TivanaError::Browser(format!(
+                "Radio element not found: {}",
+                tivana_id
+            )));
+        }
+
+        Ok(ActionResult::success())
     }
 }
 

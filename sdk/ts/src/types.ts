@@ -472,6 +472,86 @@ export interface FormFillResult {
   errors: Array<{ field: string; error: string }>;
 }
 
+/** A select option for form fields */
+export interface SelectOption {
+  value: string;
+  text: string;
+  selected: boolean;
+}
+
+/** A form field with full introspection data */
+export interface FormField {
+  tivanaId?: string;
+  tagName: string;
+  type?: string;
+  name?: string;
+  id?: string;
+  value?: string;
+  required: boolean;
+  disabled: boolean;
+  label?: string;
+  options?: SelectOption[];
+  checked?: boolean;
+  groupName?: string;
+  pattern?: string;
+  min?: string;
+  max?: string;
+  visible: boolean;
+}
+
+/** A smart fill match */
+export interface SmartFillMatch {
+  tivanaId: string;
+  label: string;
+  profileKey: string;
+  value: string;
+}
+
+/** A smart fill skip */
+export interface SmartFillSkip {
+  tivanaId?: string;
+  label?: string;
+  reason: string;
+}
+
+/** Result of a smart form fill operation */
+export interface SmartFillResult {
+  fieldsFilled: SmartFillMatch[];
+  fieldsSkipped: SmartFillSkip[];
+  totalFields: number;
+  filledCount: number;
+  durationMs: number;
+  errors: Array<{ field: string; error: string }>;
+}
+
+/** Smart fill profile - common fields for form auto-mapping */
+export interface SmartFillProfile {
+  firstName?: string;
+  lastName?: string;
+  fullName?: string;
+  email?: string;
+  phone?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  address?: string;
+  yearsExperience?: string | number;
+  salary?: string | number;
+  linkedIn?: string;
+  github?: string;
+  currentTitle?: string;
+  currentCompany?: string;
+  education?: string;
+  authorized?: boolean | string;
+  sponsorship?: boolean | string;
+  startDate?: string;
+  website?: string;
+  coverLetter?: string;
+  summary?: string;
+  country?: string;
+  [key: string]: string | number | boolean | undefined;
+}
+
 /** Navigation result */
 export interface NavigationResult {
   /** Final URL after navigation */

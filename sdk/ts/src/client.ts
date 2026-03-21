@@ -17,6 +17,7 @@ import type {
   ClientOptions,
   Cookie,
   Element,
+  FormField,
   FormFillResult,
   IncomingMessage,
   MutationCallback,
@@ -31,6 +32,8 @@ import type {
   SessionCreateResult,
   SessionInfo,
   SetCookieOptions,
+  SmartFillProfile,
+  SmartFillResult,
   TypeOptions,
   AccessibilitySnapshot,
   TextContent,
@@ -435,6 +438,13 @@ export class TivanaClient {
     return this.request("session.closeTab", { targetId });
   }
 
+  /**
+   * Clean up orphaned about:blank tabs (closes all except the active tab)
+   */
+  async cleanTabs(): Promise<{ closed: number }> {
+    return this.request("session.cleanTabs");
+  }
+
   //===========================================================================
   // Perception API
   //===========================================================================
@@ -479,6 +489,16 @@ export class TivanaClient {
    */
   async findElements(selector: string): Promise<ElementInfo[]> {
     return this.request<ElementInfo[]>("perceive.findElements", { selector });
+  }
+
+  /**
+   * Get all form fields on the page with full introspection data
+   */
+  async formFields(): Promise<FormField[]> {
+    const result = await this.request<{ fields: FormField[] }>(
+      "perceive.formFields"
+    );
+    return result.fields;
   }
 
   /**
@@ -834,6 +854,22 @@ export class TivanaClient {
     });
   }
 
+  /**
+   * Smart fill a form by matching field labels to a profile object
+   *
+   * @param profile Object with profile fields (firstName, email, etc.)
+   * @param options Smart fill options
+   */
+  async smartFill(
+    profile: SmartFillProfile,
+    options?: { skipRecaptcha?: boolean }
+  ): Promise<SmartFillResult> {
+    return this.request<SmartFillResult>("act.smartFill", {
+      profile,
+      skipRecaptcha: options?.skipRecaptcha ?? false,
+    });
+  }
+
   //===========================================================================
   // Dialog Handling API (MOS-122)
   //===========================================================================
@@ -1151,6 +1187,13 @@ export const act = {
     submit?: string
   ): Promise<FormFillResult> {
     return getClient().fillForm(fields, submit);
+  },
+
+  async smartFill(
+    profile: SmartFillProfile,
+    options?: { skipRecaptcha?: boolean }
+  ): Promise<SmartFillResult> {
+    return getClient().smartFill(profile, options);
   },
 
   async waitForSelector(

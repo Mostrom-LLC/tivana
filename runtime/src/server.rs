@@ -423,6 +423,7 @@ impl Server {
             "session.newTab" => self.handle_session_new_tab(&request).await,
             "session.closeTab" => self.handle_session_close_tab(&request).await,
             "session.get" => self.handle_session_get(&request).await,
+            "session.cleanTabs" => self.handle_session_clean_tabs(&request).await,
 
             // Browser methods
             "browser.navigate" => self.handle_browser_navigate(&request).await,
@@ -440,6 +441,7 @@ impl Server {
             "perceive.mutations" => self.handle_perceive_mutations(&request).await,
             "perceive.mutations.poll" => self.handle_perceive_mutations_poll(&request).await,
             "perceive.mutations.stop" => self.handle_perceive_mutations_stop(&request).await,
+            "perceive.formFields" => self.handle_perceive_form_fields(&request).await,
             "perceive.evaluate" => self.handle_perceive_evaluate(&request).await,
             "perceive.evaluateVoid" => self.handle_perceive_evaluate_void(&request).await,
 
@@ -458,6 +460,7 @@ impl Server {
             "act.waitForFunction" => self.handle_act_wait_for_function(&request).await,
             "act.batch" => self.handle_act_batch(&request).await,
             "act.fillForm" => self.handle_act_fill_form(&request).await,
+            "act.smartFill" => self.handle_act_smart_fill(&request).await,
 
             // Screenshot
             "perceive.screenshot" => self.handle_perceive_screenshot(&request).await,
@@ -626,6 +629,11 @@ impl Server {
             .await
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
 
+        // Auto-clean orphaned about:blank tabs from session startup
+        if let Err(e) = self.clean_blank_tabs(&session_id).await {
+            warn!(session_id = %session_id, error = %e, "Failed to auto-clean blank tabs on create");
+        }
+
         // Navigate to initial URL if specified
         if let Some(url) = config.initial_url {
             let page = self
@@ -703,6 +711,41 @@ impl Server {
             .ok_or_else(|| ProtocolError::session_not_found(&session_id))?;
 
         Ok(serde_json::to_value(info).unwrap())
+    }
+
+    async fn handle_session_clean_tabs(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+        let closed = self.clean_blank_tabs(&session_id).await?;
+        Ok(serde_json::json!({ "closed": closed }))
+    }
+
+    /// Close all about:blank tabs except the active one. Returns count of closed tabs.
+    async fn clean_blank_tabs(&self, session_id: &str) -> Result<usize, ProtocolError> {
+        let tabs = self
+            .sessions
+            .list_tabs(session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let mut closed = 0usize;
+        for tab in &tabs {
+            if tab.url == "about:blank" && !tab.active {
+                if let Err(e) = self.sessions.close_tab(session_id, &tab.target_id).await {
+                    warn!(target_id = %tab.target_id, error = %e, "Failed to close blank tab");
+                } else {
+                    closed += 1;
+                }
+            }
+        }
+
+        if closed > 0 {
+            debug!(session_id = %session_id, closed, "Cleaned orphaned about:blank tabs");
+        }
+
+        Ok(closed)
     }
 
     // Tab management handlers
@@ -974,6 +1017,25 @@ impl Server {
             })?;
 
         Ok(serde_json::to_value(&elements).unwrap_or_default())
+    }
+
+    async fn handle_perceive_form_fields(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let fields = Perceiver::form_fields(&page).await.map_err(|e| {
+            ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
+        })?;
+
+        Ok(serde_json::json!({ "fields": fields }))
     }
 
     async fn handle_perceive_evaluate(
@@ -1600,6 +1662,42 @@ impl Server {
 
         let result =
             Actor::fill_form(&page, fields, submit, mouse_pos.as_ref()).await;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    async fn handle_act_smart_fill(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let profile = request
+            .params
+            .get("profile")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| ProtocolError::missing_field("profile"))?;
+
+        let skip_recaptcha = request
+            .params
+            .get("skipRecaptcha")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let mouse_pos = self
+            .sessions
+            .get_mouse_position(&session_id)
+            .await
+            .ok();
+
+        let result =
+            Actor::smart_fill(&page, profile, skip_recaptcha, mouse_pos.as_ref()).await;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
     }
