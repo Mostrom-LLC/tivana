@@ -157,7 +157,7 @@ function wsSend(msg) {
 // Handle messages from Tivana runtime
 // ---------------------------------------------------------------------------
 
-function handleRuntimeMessage(data) {
+async function handleRuntimeMessage(data) {
   let msg;
   try {
     msg = JSON.parse(data);
