@@ -73,7 +73,7 @@ function connectWebSocket() {
     return;
   }
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
     console.log("[tivana] Connected to runtime");
     wsConnected = true;
     reconnectDelay = 1000;
