@@ -219,6 +219,12 @@ export interface Element {
   /** Computed styles (subset) */
   styles?: ElementStyles;
 
+  /** Whether the element is visible (display != none, visibility != hidden, opacity > 0, has dimensions) */
+  visible: boolean;
+
+  /** Whether the element is interactable (visible AND enabled AND not covered by another element) */
+  interactable: boolean;
+
   /** Element has focus */
   focused: boolean;
 
@@ -310,7 +316,7 @@ export interface PageMetadata {
 
 /** Mutation event - matches Rust MutationEvent enum */
 export type MutationEvent =
-  | { type: "Added"; elementId: string; parentId?: string }
+  | { type: "Added"; elementId: string; parentId?: string; role?: string; name?: string }
   | { type: "Removed"; elementId: string }
   | {
       type: "Changed";

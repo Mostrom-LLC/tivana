@@ -77,6 +77,12 @@ pub struct Element {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub styles: Option<ElementStyles>,
 
+    /// Whether the element is visible (display != none, visibility != hidden, opacity > 0, has dimensions)
+    pub visible: bool,
+
+    /// Whether the element is interactable (visible AND enabled AND not covered)
+    pub interactable: bool,
+
     /// State flags
     pub focused: bool,
     pub enabled: bool,
@@ -193,6 +199,12 @@ pub enum MutationEvent {
     Added {
         element_id: String,
         parent_id: Option<String>,
+        /// ARIA role of the added element
+        #[serde(skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+        /// Accessible name of the added element
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// Element was removed
     #[serde(rename_all = "camelCase")]
@@ -398,10 +410,14 @@ pub const MUTATION_OBSERVER_INSTALL_SCRIPT: &str = r#"(() => {
                     if (node.nodeType === 1) { // Element node
                         const id = getElementId(node);
                         const parentId = getElementId(node.parentElement);
+                        const role = node.getAttribute?.('role') || node.tagName?.toLowerCase() || null;
+                        const name = node.getAttribute?.('aria-label') || node.innerText?.trim()?.slice(0, 100) || null;
                         window.__tivana_mutations.push({
                             type: 'added',
                             elementId: id,
-                            parentId: parentId
+                            parentId: parentId,
+                            role: role,
+                            name: name
                         });
                     }
                 }
@@ -663,6 +679,14 @@ pub fn parse_mutation_event(value: &serde_json::Value) -> Option<MutationEvent> 
                 .get("parentId")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            role: value
+                .get("role")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            name: value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         }),
         "removed" => Some(MutationEvent::Removed {
             element_id: value.get("elementId")?.as_str()?.to_string(),
@@ -835,14 +859,17 @@ impl Perceiver {
             const interactiveElements = document.querySelectorAll(selector);
 
             for (const el of interactiveElements) {
-                // Skip hidden elements
                 const style = window.getComputedStyle(el);
-                if (style.display === 'none' || style.visibility === 'hidden') {
-                    continue;
-                }
-
                 const rect = el.getBoundingClientRect();
-                if (rect.width === 0 && rect.height === 0) {
+
+                // Compute visibility: display != none, visibility != hidden, opacity > 0, has dimensions
+                const isVisible = style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && parseFloat(style.opacity) > 0
+                    && (rect.width > 0 || rect.height > 0);
+
+                // Skip fully hidden elements (display:none with no dimensions)
+                if (style.display === 'none' && rect.width === 0 && rect.height === 0) {
                     continue;
                 }
 
@@ -961,6 +988,17 @@ impl Perceiver {
                     visibility: style.visibility
                 };
 
+                // Compute interactable: visible AND enabled AND not covered by another element
+                let interactable = isVisible && enabled;
+                if (interactable && rect.width > 0 && rect.height > 0) {
+                    const cx = rect.x + rect.width / 2;
+                    const cy = rect.y + rect.height / 2;
+                    const topEl = document.elementFromPoint(cx, cy);
+                    if (topEl && topEl !== el && !el.contains(topEl) && !topEl.contains(el)) {
+                        interactable = false;
+                    }
+                }
+
                 elements.push({
                     id: getStableId(el),
                     role: role,
@@ -974,6 +1012,8 @@ impl Perceiver {
                         height: rect.height
                     },
                     styles: styles,
+                    visible: isVisible,
+                    interactable: interactable,
                     focused: focused,
                     enabled: enabled,
                     checked: checked,
@@ -1014,9 +1054,9 @@ pub fn elements_script() -> String {
             const selector = ['a[href]','button','input','select','textarea','[role="button"]','[role="link"]','[role="checkbox"]','[role="radio"]','[role="menuitem"]','[role="tab"]','[role="option"]','[role="switch"]','[role="slider"]','[role="spinbutton"]','[role="searchbox"]','[role="textbox"]','[role="combobox"]','[tabindex]:not([tabindex="-1"])','[contenteditable="true"]'].join(', ');
             for (const el of document.querySelectorAll(selector)) {
                 const style = window.getComputedStyle(el);
-                if (style.display === 'none' || style.visibility === 'hidden') continue;
                 const rect = el.getBoundingClientRect();
-                if (rect.width === 0 && rect.height === 0) continue;
+                const isVisible = style.display !== 'none' && style.visibility !== 'hidden' && parseFloat(style.opacity) > 0 && (rect.width > 0 || rect.height > 0);
+                if (style.display === 'none' && rect.width === 0 && rect.height === 0) continue;
                 let role = el.getAttribute('role') || el.tagName.toLowerCase();
                 if (role === 'input') role = el.type || 'text';
                 let name = el.getAttribute('aria-label');
@@ -1029,11 +1069,19 @@ pub fn elements_script() -> String {
                 if (!name) { const inner = el.innerText?.trim()?.slice(0,100); if (inner) name = inner; }
                 if (!name && el.value) name = el.value;
                 let value = (el.value !== undefined && el.value !== '') ? el.value : null;
+                const enabled = !el.disabled;
+                let interactable = isVisible && enabled;
+                if (interactable && rect.width > 0 && rect.height > 0) {
+                    const cx = rect.x + rect.width / 2; const cy = rect.y + rect.height / 2;
+                    const topEl = document.elementFromPoint(cx, cy);
+                    if (topEl && topEl !== el && !el.contains(topEl) && !topEl.contains(el)) interactable = false;
+                }
                 elements.push({
                     id: getStableId(el), role, name, value,
                     bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                    visible: isVisible, interactable: interactable,
                     focused: document.activeElement === el,
-                    enabled: !el.disabled,
+                    enabled: enabled,
                     checked: (el.type==='checkbox'||el.type==='radio') ? el.checked : undefined,
                     required: el.required || undefined,
                 });
@@ -1065,6 +1113,8 @@ impl Perceiver {
             description: None,
             bounds: None,
             styles: None,
+            visible: true,
+            interactable: false,
             focused: false,
             enabled: true,
             checked: None,
@@ -1613,6 +1663,8 @@ mod tests {
                 height: 40.0,
             }),
             styles: None,
+            visible: true,
+            interactable: true,
             focused: false,
             enabled: true,
             checked: None,
@@ -1632,6 +1684,8 @@ mod tests {
         let event = MutationEvent::Added {
             element_id: "e5".to_string(),
             parent_id: Some("e1".to_string()),
+            role: Some("button".to_string()),
+            name: Some("Click me".to_string()),
         };
 
         let json = serde_json::to_string(&event).unwrap();
@@ -1695,6 +1749,7 @@ mod tests {
             MutationEvent::Added {
                 element_id,
                 parent_id,
+                ..
             } => {
                 assert_eq!(element_id, "e10");
                 assert_eq!(parent_id, Some("e1".to_string()));
