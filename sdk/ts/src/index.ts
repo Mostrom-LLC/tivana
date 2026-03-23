@@ -63,6 +63,16 @@ export type {
   MutationEvent,
   MutationCallback,
 
+  // Page Events
+  PageEventType,
+  PageLoadedEvent,
+  PageNavigatedEvent,
+  PageFocusEvent,
+  PageScrollEvent,
+  PageResizeEvent,
+  PageEvent,
+  PageEventCallback,
+
   // Actions
   ActionTarget,
   ClickTarget,

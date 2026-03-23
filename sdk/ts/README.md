@@ -159,17 +159,51 @@ Available, but not the primary product story:
 - cookies and storage helpers
 - extension-backed session helpers
 
-## Mutation and Observation Notes
+## Observation & Page Events
 
-The runtime supports mutation/event streaming, and the SDK exposes `onMutation(callback)`.
+The SDK provides first-class observation of page events via `observe()`:
 
-Current recommendation:
+```typescript
+import { TivanaClient, observe, act } from "tivana";
 
-- use explicit `pageState()` + `elements()` loops for now
-- treat mutation callbacks as an advanced hook
-- avoid building integration logic around brittle polling or site-specific scripts
+const client = new TivanaClient();
+await client.connect("ws://localhost:9876");
+await client.createSession();
+await client.navigate("https://example.com");
 
-The refocus plan is to make observation/subscription lifecycle first-class in the SDK.
+// Observe page events
+const stop = await observe(async (event) => {
+  console.log(`[${event.type}]`, event.data);
+
+  if (event.type === "page.loaded") {
+    const elements = await client.elements();
+    // Agent reasons about elements and decides...
+  }
+});
+
+// Later: stop()
+```
+
+Supported event types: `page.mutation`, `page.loaded`, `page.navigated`, `page.focus`, `page.scroll`, `page.resize`.
+
+You can filter to specific events:
+
+```typescript
+const stop = await observe(callback, {
+  events: ["page.loaded", "page.navigated"],
+});
+```
+
+For lower-level control, use the `TivanaClient` event API directly:
+
+```typescript
+await client.startObservation();
+client.onPageEvent("page.navigated", (event) => { ... });
+client.onEvent((event) => { ... }); // all events
+await client.stopObservation();
+```
+
+The legacy `onMutation(callback)` API continues to work for DOM mutation events only.
 
 ## Targets
 

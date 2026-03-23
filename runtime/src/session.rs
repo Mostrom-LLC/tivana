@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::browser::{BrowserHandle, PageHandle};
 use crate::error::{ProtocolError, TivanaError};
-use crate::perceive::{MutationEvent, MutationObserverHandle};
+use crate::perceive::{MutationEvent, MutationObserverHandle, PageEvent, PageEventHandle};
 use crate::proxy::{ProxyConfig, ProxyPool};
 
 /// Session lifecycle states
@@ -55,6 +55,12 @@ pub struct Session {
     /// Mutation events receiver
     pub mutation_rx: Option<mpsc::Receiver<MutationEvent>>,
 
+    /// Page event handle (for stopping)
+    pub page_event_handle: Option<PageEventHandle>,
+
+    /// Page event receiver
+    pub page_event_rx: Option<mpsc::Receiver<PageEvent>>,
+
     /// Current proxy configuration
     pub proxy: Option<ProxyConfig>,
 
@@ -75,6 +81,7 @@ impl std::fmt::Debug for Session {
                 "mutation_observer",
                 &self.mutation_observer_handle.is_some(),
             )
+            .field("page_events", &self.page_event_handle.is_some())
             .field("proxy", &self.proxy)
             .field("proxy_pool", &self.proxy_pool)
             .finish()
@@ -112,6 +119,8 @@ impl Session {
             config,
             mutation_observer_handle: None,
             mutation_rx: None,
+            page_event_handle: None,
+            page_event_rx: None,
             proxy,
             proxy_pool: None,
         }
@@ -151,6 +160,11 @@ impl Session {
             handle.stop();
         }
         self.mutation_rx = None;
+        // Stop page events if running
+        if let Some(handle) = self.page_event_handle.take() {
+            handle.stop();
+        }
+        self.page_event_rx = None;
     }
 
     /// Start mutation observation
@@ -179,6 +193,29 @@ impl Session {
     /// Take the mutation receiver (for streaming)
     pub fn take_mutation_rx(&mut self) -> Option<mpsc::Receiver<MutationEvent>> {
         self.mutation_rx.take()
+    }
+
+    /// Start page event observation
+    pub fn start_page_events(
+        &mut self,
+        rx: mpsc::Receiver<PageEvent>,
+        handle: PageEventHandle,
+    ) {
+        self.page_event_rx = Some(rx);
+        self.page_event_handle = Some(handle);
+    }
+
+    /// Stop page event observation
+    pub fn stop_page_events(&mut self) {
+        if let Some(handle) = self.page_event_handle.take() {
+            handle.stop();
+        }
+        self.page_event_rx = None;
+    }
+
+    /// Check if page events are running
+    pub fn is_page_events_running(&self) -> bool {
+        self.page_event_handle.is_some()
     }
 
     /// Check if session is active

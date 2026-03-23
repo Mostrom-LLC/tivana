@@ -25,7 +25,7 @@ use crate::cli::Args;
 use crate::error::{ProtocolError, TivanaError};
 use crate::extension::{self, ExtensionManager};
 use crate::network::NetworkManager;
-use crate::perceive::{setup_mutation_observer, stop_mutation_observer, Perceiver, ScreenshotOptions};
+use crate::perceive::{setup_mutation_observer, setup_page_events, stop_mutation_observer, stop_page_events, PageEvent, Perceiver, ScreenshotOptions};
 use crate::persistence;
 use crate::protocol::{
     parse_request, serialize_outbound, EventMessage, OutboundMessage, ResponseMessage,
@@ -316,21 +316,37 @@ impl Server {
                             break;
                         }
 
-                        // If this was a mutations start request, kick off event pushing
+                        // If this was a mutations/observe start request, kick off event pushing
                         if let Ok(req) = parse_request(&text) {
-                            if req.method == "perceive.mutations" {
-                                let sid = req.session_id.clone().or_else(|| {
-                                    req.params
-                                        .get("sessionId")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from)
-                                });
+                            let sid = req.session_id.clone().or_else(|| {
+                                req.params
+                                    .get("sessionId")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from)
+                            });
 
+                            if req.method == "perceive.mutations" {
                                 if let Some(session_id) = sid {
                                     let tx = outbound_tx.clone();
                                     let sessions = self.sessions.clone();
                                     tokio::spawn(async move {
                                         Self::push_mutation_events(sessions, session_id, tx).await;
+                                    });
+                                }
+                            } else if req.method == "perceive.observe" {
+                                if let Some(session_id) = sid {
+                                    // Push mutation events
+                                    let tx1 = outbound_tx.clone();
+                                    let sessions1 = self.sessions.clone();
+                                    let sid1 = session_id.clone();
+                                    tokio::spawn(async move {
+                                        Self::push_mutation_events(sessions1, sid1, tx1).await;
+                                    });
+                                    // Push page events
+                                    let tx2 = outbound_tx.clone();
+                                    let sessions2 = self.sessions.clone();
+                                    tokio::spawn(async move {
+                                        Self::push_page_events(sessions2, session_id, tx2).await;
                                     });
                                 }
                             }
@@ -426,6 +442,72 @@ impl Server {
                 };
                 if tx.send(msg).await.is_err() {
                     break; // Client disconnected
+                }
+            }
+        }
+    }
+
+    /// Push page events from a session's page event receiver to the WebSocket client
+    async fn push_page_events(
+        sessions: SessionRegistry,
+        session_id: String,
+        tx: mpsc::Sender<String>,
+    ) {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+
+        loop {
+            interval.tick().await;
+
+            let mut events: Vec<PageEvent> = Vec::new();
+
+            let result = sessions
+                .with_session(&session_id, |session| {
+                    if let Some(rx) = session.page_event_rx.as_mut() {
+                        while events.len() < 50 {
+                            match rx.try_recv() {
+                                Ok(event) => events.push(event),
+                                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                    return Err(crate::error::TivanaError::Session(
+                                        "Page event observer disconnected".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    } else {
+                        return Err(crate::error::TivanaError::Session(
+                            "No page event observer".to_string(),
+                        ));
+                    }
+                    Ok(())
+                })
+                .await;
+
+            if result.is_err() {
+                debug!(session_id = %session_id, "Stopping page event push");
+                break;
+            }
+
+            // Send each page event as its own event message with the appropriate event name
+            for page_event in events {
+                let event_name = match &page_event {
+                    PageEvent::Loaded { .. } => "page.loaded",
+                    PageEvent::Navigated { .. } => "page.navigated",
+                    PageEvent::Focus { .. } => "page.focus",
+                    PageEvent::Scroll { .. } => "page.scroll",
+                    PageEvent::Resize { .. } => "page.resize",
+                };
+                let event = EventMessage::for_session(
+                    &session_id,
+                    event_name,
+                    serde_json::to_value(&page_event).unwrap_or_default(),
+                );
+                let msg = match serialize_outbound(&OutboundMessage::Event(event)) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if tx.send(msg).await.is_err() {
+                    return; // Client disconnected
                 }
             }
         }
@@ -545,6 +627,8 @@ impl Server {
             "perceive.mutations" => self.handle_perceive_mutations(&request).await,
             "perceive.mutations.poll" => self.handle_perceive_mutations_poll(&request).await,
             "perceive.mutations.stop" => self.handle_perceive_mutations_stop(&request).await,
+            "perceive.observe" => self.handle_perceive_observe(&request).await,
+            "perceive.unobserve" => self.handle_perceive_unobserve(&request).await,
             "perceive.formFields" => self.handle_perceive_form_fields(&request).await,
             "perceive.evaluate" => self.handle_perceive_evaluate(&request).await,
             "perceive.evaluateVoid" => self.handle_perceive_evaluate_void(&request).await,
@@ -1738,6 +1822,116 @@ impl Server {
         }))
     }
 
+    /// Handle perceive.observe — starts both mutation stream AND page event injection
+    async fn handle_perceive_observe(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        // Get the page
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        // Start mutation observer if not already running
+        let mutation_already_running = self
+            .sessions
+            .with_session(&session_id, |session| {
+                Ok(session.is_mutation_observer_running())
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        if !mutation_already_running {
+            let (rx, handle) = setup_mutation_observer(&page).await.map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
+            })?;
+
+            self.sessions
+                .with_session(&session_id, |session| {
+                    session.start_mutation_observer(rx, handle);
+                    Ok(())
+                })
+                .await
+                .map_err(|e| ProtocolError::internal(e.to_string()))?;
+        }
+
+        // Start page events if not already running
+        let page_events_already_running = self
+            .sessions
+            .with_session(&session_id, |session| {
+                Ok(session.is_page_events_running())
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        if !page_events_already_running {
+            let (rx, handle) = setup_page_events(&page).await.map_err(|e| {
+                ProtocolError::new(crate::error::ErrorCode::PerceptionFailed, e.to_string())
+            })?;
+
+            self.sessions
+                .with_session(&session_id, |session| {
+                    session.start_page_events(rx, handle);
+                    Ok(())
+                })
+                .await
+                .map_err(|e| ProtocolError::internal(e.to_string()))?;
+        }
+
+        info!(session_id = %session_id, "Observation started (mutations + page events)");
+
+        Ok(serde_json::json!({
+            "status": "started",
+            "sessionId": session_id,
+            "message": "Mutation and page events will be streamed as server events"
+        }))
+    }
+
+    /// Handle perceive.unobserve — stops both mutation stream AND page events
+    async fn handle_perceive_unobserve(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        // Stop mutation observer
+        let _ = stop_mutation_observer(&page).await;
+        self.sessions
+            .with_session(&session_id, |session| {
+                session.stop_mutation_observer();
+                Ok(())
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        // Stop page events
+        let _ = stop_page_events(&page).await;
+        self.sessions
+            .with_session(&session_id, |session| {
+                session.stop_page_events();
+                Ok(())
+            })
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        info!(session_id = %session_id, "Observation stopped");
+
+        Ok(serde_json::json!({
+            "status": "stopped",
+            "sessionId": session_id
+        }))
+    }
+
     // Action handlers
 
     async fn handle_act_click(
@@ -2876,6 +3070,8 @@ mod tests {
             chrome_path: None,
             host: "127.0.0.1".to_string(),
             connect: None,
+            use_default_browser: false,
+            user_data_dir: None,
         };
         let server = Server::new(args).unwrap();
         assert_eq!(server.addr.port(), 9876);

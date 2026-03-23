@@ -325,6 +325,67 @@ export type MutationEvent =
 export type MutationCallback = (events: MutationEvent[]) => void;
 
 //=============================================================================
+// Page Event Types
+//=============================================================================
+
+/** Page event types */
+export type PageEventType =
+  | "page.mutation"
+  | "page.loaded"
+  | "page.navigated"
+  | "page.focus"
+  | "page.scroll"
+  | "page.resize";
+
+/** Page loaded event data */
+export interface PageLoadedEvent {
+  url: string;
+  title: string | null;
+  timestampMs: number;
+}
+
+/** Page navigated event data */
+export interface PageNavigatedEvent {
+  url: string;
+  previousUrl?: string;
+  timestampMs: number;
+}
+
+/** Page focus event data */
+export interface PageFocusEvent {
+  elementId: string | null;
+  role?: string;
+  name?: string;
+  timestampMs: number;
+}
+
+/** Page scroll event data */
+export interface PageScrollEvent {
+  scrollX: number;
+  scrollY: number;
+  timestampMs: number;
+}
+
+/** Page resize event data */
+export interface PageResizeEvent {
+  viewportWidth: number;
+  viewportHeight: number;
+  timestampMs: number;
+}
+
+/** Union of all page events */
+export type PageEvent =
+  | { type: "page.mutation"; data: MutationEvent[] }
+  | { type: "page.loaded"; data: PageLoadedEvent }
+  | { type: "page.navigated"; data: PageNavigatedEvent }
+  | { type: "page.focus"; data: PageFocusEvent }
+  | { type: "page.scroll"; data: PageScrollEvent }
+  | { type: "page.resize"; data: PageResizeEvent };
+
+/** Event callback */
+export type PageEventCallback = (event: PageEvent) => void | Promise<void>;
+
+//=============================================================================
 // Action Types
 //=============================================================================
 

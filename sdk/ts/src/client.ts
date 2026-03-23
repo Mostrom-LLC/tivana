@@ -24,6 +24,9 @@ import type {
   MutationEvent,
   NetworkRequest,
   OutgoingMessage,
+  PageEvent,
+  PageEventCallback,
+  PageEventType,
   PageState,
   ScreenshotOptions,
   ScreenshotResult,
@@ -81,6 +84,7 @@ export class TivanaClient {
   private messageId = 0;
   private pending = new Map<string, PendingRequest>();
   private mutationCallbacks: MutationCallback[] = [];
+  private pageEventCallbacks: Map<string, PageEventCallback[]> = new Map();
   private connected = false;
   private nodeWs: typeof import("ws") | null = null;
 
@@ -281,7 +285,7 @@ export class TivanaClient {
 
     // Handle events (mutations, page events, etc.)
     if (message.type === "event") {
-      // Handle mutation events
+      // Handle mutation events (legacy onMutation API)
       if (message.event === "page.mutation" || message.event === "mutations") {
         const events = (message.data as MutationEvent[]) || [];
         for (const callback of this.mutationCallbacks) {
@@ -289,6 +293,30 @@ export class TivanaClient {
             callback(events);
           } catch (e) {
             console.error("Mutation callback error:", e);
+          }
+        }
+      }
+
+      // Route to page event callbacks
+      if (message.event) {
+        const pageEvent: PageEvent = {
+          type: message.event as PageEvent["type"],
+          data: message.data,
+        } as PageEvent;
+
+        // Fire specific event callbacks
+        const specific = this.pageEventCallbacks.get(message.event);
+        if (specific) {
+          for (const cb of specific) {
+            try { const r = cb(pageEvent); if (r instanceof Promise) r.catch(e => console.error("Page event callback error:", e)); } catch (e) { console.error("Page event callback error:", e); }
+          }
+        }
+
+        // Fire wildcard callbacks
+        const wildcard = this.pageEventCallbacks.get("*");
+        if (wildcard) {
+          for (const cb of wildcard) {
+            try { const r = cb(pageEvent); if (r instanceof Promise) r.catch(e => console.error("Page event callback error:", e)); } catch (e) { console.error("Page event callback error:", e); }
           }
         }
       }
@@ -576,6 +604,45 @@ export class TivanaClient {
         this.mutationCallbacks.splice(index, 1);
       }
     };
+  }
+
+  /**
+   * Subscribe to specific page event type or all events.
+   * Returns an unsubscribe function.
+   */
+  onPageEvent(
+    event: PageEventType | "*",
+    callback: PageEventCallback
+  ): () => void {
+    const callbacks = this.pageEventCallbacks.get(event) || [];
+    callbacks.push(callback);
+    this.pageEventCallbacks.set(event, callbacks);
+    return () => {
+      const arr = this.pageEventCallbacks.get(event) || [];
+      const idx = arr.indexOf(callback);
+      if (idx !== -1) arr.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Subscribe to all page events (alias for onPageEvent("*", callback))
+   */
+  onEvent(callback: PageEventCallback): () => void {
+    return this.onPageEvent("*", callback);
+  }
+
+  /**
+   * Start observation — tells runtime to begin streaming mutations and page events
+   */
+  async startObservation(): Promise<void> {
+    await this.request("perceive.observe", {});
+  }
+
+  /**
+   * Stop observation — tells runtime to stop streaming events
+   */
+  async stopObservation(): Promise<void> {
+    await this.request("perceive.unobserve", {});
   }
 
   /**
@@ -1158,28 +1225,44 @@ export function getClient(): TivanaClient {
 }
 
 /**
- * Observe page state (convenience function)
+ * Observe page events (convenience function).
+ *
+ * Starts observation, subscribes to events, and fires an initial page.loaded snapshot.
+ * Returns a cleanup function that unsubscribes and stops observation.
+ *
+ * @param callback Called for each page event
+ * @param options Optional filter for specific event types
  */
 export async function observe(
-  callback: (page: PageState, elements: Element[]) => void | Promise<void>
+  callback: PageEventCallback,
+  options?: { events?: PageEventType[] }
 ): Promise<() => void> {
   const client = getClient();
 
-  // Initial state
-  const [page, elements] = await Promise.all([
+  // Start observation (mutations + page events)
+  await client.startObservation();
+
+  // Subscribe to events
+  const unsubscribe = client.onEvent(async (event) => {
+    if (!options?.events || options.events.includes(event.type)) {
+      await callback(event);
+    }
+  });
+
+  // Fire initial snapshot as page.loaded
+  const [page] = await Promise.all([
     client.pageState(),
     client.elements(),
   ]);
-  await callback(page, elements);
-
-  // Subscribe to mutations
-  return client.onMutation(async () => {
-    const [page, elements] = await Promise.all([
-      client.pageState(),
-      client.elements(),
-    ]);
-    await callback(page, elements);
+  await callback({
+    type: "page.loaded",
+    data: { url: page.url, title: page.title, timestampMs: Date.now() },
   });
+
+  return () => {
+    unsubscribe();
+    client.stopObservation().catch(() => {});
+  };
 }
 
 /**

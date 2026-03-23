@@ -210,6 +210,263 @@ pub enum MutationEvent {
     TextChanged { element_id: String, text: String },
 }
 
+/// Page-level event (navigation, focus, scroll, resize)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum PageEvent {
+    /// Page finished loading
+    #[serde(rename = "page.loaded", rename_all = "camelCase")]
+    Loaded {
+        url: String,
+        title: Option<String>,
+        timestamp_ms: u64,
+    },
+    /// URL changed (pushState, replaceState, navigation)
+    #[serde(rename = "page.navigated", rename_all = "camelCase")]
+    Navigated {
+        url: String,
+        previous_url: Option<String>,
+        timestamp_ms: u64,
+    },
+    /// Focused element changed
+    #[serde(rename = "page.focus", rename_all = "camelCase")]
+    Focus {
+        element_id: Option<String>,
+        role: Option<String>,
+        name: Option<String>,
+        timestamp_ms: u64,
+    },
+    /// Scroll position changed (throttled 200ms)
+    #[serde(rename = "page.scroll", rename_all = "camelCase")]
+    Scroll {
+        scroll_x: f64,
+        scroll_y: f64,
+        timestamp_ms: u64,
+    },
+    /// Viewport resized
+    #[serde(rename = "page.resize", rename_all = "camelCase")]
+    Resize {
+        viewport_width: f64,
+        viewport_height: f64,
+        timestamp_ms: u64,
+    },
+}
+
+/// Handle for controlling page event observation
+pub struct PageEventHandle {
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+}
+
+impl PageEventHandle {
+    pub fn stop(self) {
+        let _ = self.shutdown_tx.send(());
+    }
+}
+
+/// Install page event listeners and start polling them
+///
+/// Injects JS listeners for focus, scroll, popstate, hashchange, load, resize.
+/// Events are collected into `__tivana_page_events` and polled every 100ms.
+pub async fn setup_page_events(
+    page: &Arc<PageHandle>,
+) -> Result<(mpsc::Receiver<PageEvent>, PageEventHandle), PerceptionError> {
+    debug!("Setting up page event listeners");
+
+    let install_script = r#"(() => {
+        if (window.__tivana_page_events) return { status: 'already_running' };
+        window.__tivana_page_events = [];
+
+        let lastUrl = window.location.href;
+        let scrollTimer = null;
+
+        // Focus change
+        document.addEventListener('focusin', (e) => {
+            const el = e.target;
+            const id = el?.dataset?.tivanaId || null;
+            const role = el?.getAttribute?.('role') || el?.tagName?.toLowerCase() || null;
+            const name = el?.getAttribute?.('aria-label') || el?.textContent?.slice(0, 50)?.trim() || null;
+            window.__tivana_page_events.push({
+                type: 'focus',
+                elementId: id,
+                role: role,
+                name: name,
+                timestampMs: Date.now()
+            });
+        }, true);
+
+        // Scroll (throttled to 200ms)
+        window.addEventListener('scroll', () => {
+            if (scrollTimer) return;
+            scrollTimer = setTimeout(() => {
+                scrollTimer = null;
+                window.__tivana_page_events.push({
+                    type: 'scroll',
+                    scrollX: window.scrollX,
+                    scrollY: window.scrollY,
+                    timestampMs: Date.now()
+                });
+            }, 200);
+        }, { passive: true });
+
+        // Resize
+        window.addEventListener('resize', () => {
+            window.__tivana_page_events.push({
+                type: 'resize',
+                viewportWidth: window.innerWidth,
+                viewportHeight: window.innerHeight,
+                timestampMs: Date.now()
+            });
+        });
+
+        // Navigation: popstate, hashchange
+        const pushNav = () => {
+            const newUrl = window.location.href;
+            if (newUrl !== lastUrl) {
+                const prev = lastUrl;
+                lastUrl = newUrl;
+                window.__tivana_page_events.push({
+                    type: 'navigated',
+                    url: newUrl,
+                    previousUrl: prev,
+                    timestampMs: Date.now()
+                });
+            }
+        };
+        window.addEventListener('popstate', pushNav);
+        window.addEventListener('hashchange', pushNav);
+
+        // Intercept pushState/replaceState
+        const origPush = history.pushState;
+        const origReplace = history.replaceState;
+        history.pushState = function() {
+            origPush.apply(this, arguments);
+            pushNav();
+        };
+        history.replaceState = function() {
+            origReplace.apply(this, arguments);
+            pushNav();
+        };
+
+        // Page load
+        window.addEventListener('load', () => {
+            window.__tivana_page_events.push({
+                type: 'loaded',
+                url: window.location.href,
+                title: document.title || null,
+                timestampMs: Date.now()
+            });
+        });
+
+        return { status: 'started' };
+    })()"#;
+
+    let result: serde_json::Value = page
+        .evaluate(install_script)
+        .await
+        .map_err(|e| PerceptionError(format!("Failed to install page event listeners: {}", e)))?;
+
+    debug!(result = ?result, "Page event listeners installed");
+
+    let (tx, rx) = mpsc::channel::<PageEvent>(256);
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let page_clone = Arc::clone(page);
+
+    tokio::spawn(async move {
+        let poll_script = r#"(() => {
+            const events = window.__tivana_page_events || [];
+            window.__tivana_page_events = [];
+            return events;
+        })()"#;
+
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    match page_clone.evaluate::<Vec<serde_json::Value>>(poll_script).await {
+                        Ok(events) => {
+                            for event_json in events {
+                                if let Some(event) = parse_page_event(&event_json) {
+                                    if tx.send(event).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to poll page events");
+                        }
+                    }
+                }
+                _ = &mut shutdown_rx => {
+                    let cleanup_script = r#"(() => {
+                        delete window.__tivana_page_events;
+                        return { status: 'stopped' };
+                    })()"#;
+                    let _ = page_clone.evaluate::<serde_json::Value>(cleanup_script).await;
+                    debug!("Page event listeners stopped");
+                    return;
+                }
+            }
+        }
+    });
+
+    let handle = PageEventHandle { shutdown_tx };
+    Ok((rx, handle))
+}
+
+/// Parse a page event from JavaScript JSON
+fn parse_page_event(value: &serde_json::Value) -> Option<PageEvent> {
+    let event_type = value.get("type")?.as_str()?;
+    let timestamp_ms = value.get("timestampMs")?.as_u64()?;
+
+    match event_type {
+        "loaded" => Some(PageEvent::Loaded {
+            url: value.get("url")?.as_str()?.to_string(),
+            title: value.get("title").and_then(|v| v.as_str()).map(String::from),
+            timestamp_ms,
+        }),
+        "navigated" => Some(PageEvent::Navigated {
+            url: value.get("url")?.as_str()?.to_string(),
+            previous_url: value.get("previousUrl").and_then(|v| v.as_str()).map(String::from),
+            timestamp_ms,
+        }),
+        "focus" => Some(PageEvent::Focus {
+            element_id: value.get("elementId").and_then(|v| v.as_str()).map(String::from),
+            role: value.get("role").and_then(|v| v.as_str()).map(String::from),
+            name: value.get("name").and_then(|v| v.as_str()).map(String::from),
+            timestamp_ms,
+        }),
+        "scroll" => Some(PageEvent::Scroll {
+            scroll_x: value.get("scrollX")?.as_f64()?,
+            scroll_y: value.get("scrollY")?.as_f64()?,
+            timestamp_ms,
+        }),
+        "resize" => Some(PageEvent::Resize {
+            viewport_width: value.get("viewportWidth")?.as_f64()?,
+            viewport_height: value.get("viewportHeight")?.as_f64()?,
+            timestamp_ms,
+        }),
+        _ => None,
+    }
+}
+
+/// Stop page event observation on a page
+pub async fn stop_page_events(page: &Arc<PageHandle>) -> Result<(), PerceptionError> {
+    debug!("Stopping page event listeners");
+
+    let cleanup_script = r#"(() => {
+        delete window.__tivana_page_events;
+        return { status: 'stopped' };
+    })()"#;
+
+    page.evaluate::<serde_json::Value>(cleanup_script)
+        .await
+        .map_err(|e| PerceptionError(format!("Failed to stop page events: {}", e)))?;
+
+    Ok(())
+}
+
 /// Error type for perception operations
 #[derive(Debug, Clone)]
 pub struct PerceptionError(pub String);
