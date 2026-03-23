@@ -1,363 +1,242 @@
 # Tivana
 
-**Zero-config browser automation that just works.** Stealth-first, fast, and built for developers who don't want to fight with CAPTCHAs, fingerprinting, or brittle selectors.
+Perception-first browser protocol for AI agents.
+
+Tivana gives agents continuous, semantic awareness of web pages so they can perceive what is on screen, reason about it, and take action. The agent makes the decisions. Tivana provides the eyes and hands.
+
+Status: pre-release.
+
+## What Tivana Is
+
+- A protocol and runtime for semantic browser perception.
+- A thin action layer for clicking, typing, scrolling, and navigation by semantic target.
+- A foundation for exploratory QA, accessibility review, visual reasoning, and human-observable agent browsing.
+
+## What Tivana Is Not
+
+- A hardcoded site automation framework.
+- A collection of brittle field matchers and workflow scripts.
+- A stealth, CAPTCHA, or proxy product.
+- A replacement for agent reasoning.
+
+## Core Model
+
+The intended loop is simple:
+
+1. Perceive the page.
+2. Reason about what the page means.
+3. Act on the page.
+4. Observe the result and adapt.
+
+```text
+Browser -> Tivana runtime -> Agent
+   ^            |             |
+   |            v             |
+   +-------- semantic action <-+
+```
+
+Tivana should not contain site-specific business logic like "if the label contains sponsorship, answer No." That belongs in the agent loop, not in the runtime.
+
+## Current Capabilities
+
+### Perceive
+
+- `perceive.pageState`
+- `perceive.elements`
+- `perceive.accessibilitySnapshot`
+- `perceive.textContent`
+- `perceive.metadata`
+- `perceive.mutations` at the protocol/runtime layer
+
+### Act
+
+- `act.navigate`
+- `act.click`
+- `act.type`
+- `act.press`
+- `act.scroll`
+- `act.hover`
+- `act.focus`
+- `act.select`
+
+### Secondary Utilities
+
+These exist, but they are not the center of the product story:
+
+- JavaScript evaluation
+- screenshots
+- network capture
+- tabs
+- cookies and storage
+- extension-backed session transport
+
+## Quick Start
+
+### 1. Build the runtime
 
 ```bash
-npm install tivana  # coming soon
+git clone https://github.com/Mostrom-LLC/tivana.git
+cd tivana/runtime
+cargo build --release
 ```
+
+### 2. Start Tivana
+
+```bash
+./target/release/tivana
+```
+
+Common options:
+
+```bash
+./target/release/tivana --headless
+./target/release/tivana --port 9876
+./target/release/tivana --connect 9222
+```
+
+### 3. Use the SDK
+
+```bash
+cd ../sdk/ts
+bun install
+```
+
+## Minimal Perceive -> Reason -> Act Example
 
 ```typescript
 import { TivanaClient } from "tivana";
 
 const client = new TivanaClient();
-await client.connect();
+await client.connect("ws://localhost:9876");
 await client.createSession();
 
 await client.navigate("https://example.com");
-const elements = await client.elements();
-await client.click(elements[0].id);
 
-// Extract design tokens in 1ms
-const tokens = await client.evaluate(`({
-  bg: getComputedStyle(document.body).backgroundColor,
-  font: getComputedStyle(document.body).fontFamily,
-  props: Object.keys(getComputedStyle(document.body)).length
-})`);
-```
-
-> **Status:** Pre-release. All features built and tested. npm publish coming soon.
-
----
-
-## Features
-
-### 🛡️ Stealth & Anti-Detection
-Browser fingerprint hardening out of the box. WebGL, Canvas, AudioContext, plugins, and language spoofing. Human-like mouse movement via Bézier curves. Realistic typing cadence with variable per-character delays. Passes **55/56 bot detection tests** with zero configuration.
-
-### 🔓 Zero-Config CAPTCHA Solver
-Auto-detects reCAPTCHA v2/v3, hCaptcha, and Cloudflare Turnstile. Stealth-first approach means CAPTCHAs rarely trigger. When they do, audio challenge + local Whisper transcription handles it. **No API keys. No paid services. No config.**
-
-### ⚡ Batch Actions & Speed
-Execute multiple actions in a single WebSocket roundtrip. `fillForm()` fills an entire form from a field map in one call. Sub-second form fills, sub-2s batch operations.
-
-```typescript
-await client.batch([
-  { type: "click", target: "e5" },
-  { type: "type", target: "e5", text: "hello@example.com" },
-  { type: "click", target: "e12" }
-]);
-
-await client.fillForm({
-  "e5": "John Doe",
-  "e8": "john@example.com",
-  "e11": true  // checkbox
-}, "e15"); // submit button
-```
-
-### 👁️ Page Perception
-Discover every interactive element with semantic roles, labels, checked state, and accessibility info. Full text content extraction. Page state including URL, title, viewport, scroll position, and focused element.
-
-```typescript
-const elements = await client.elements();
-// → [{ id: "e1", role: "textbox", name: "Email", enabled: true, focused: false }, ...]
-
-const state = await client.pageState();
-// → { url: "...", title: "...", viewport: { width: 1440, height: 900 } }
-```
-
-### 🧠 Arbitrary JavaScript Execution
-Run any JS on the page and get structured results back. Extract computed styles, CSS custom properties, DOM data. Run accessibility audits. Access any browser API.
-
-```typescript
-const tokens = await client.evaluate(`({
-  colors: {
-    bg: getComputedStyle(document.body).backgroundColor,
-    text: getComputedStyle(document.body).color
-  },
-  fonts: getComputedStyle(document.body).fontFamily,
-  customProps: Array.from(document.styleSheets)
-    .flatMap(s => { try { return [...s.cssRules] } catch { return [] } })
-    .flatMap(r => (r.cssText.match(/--[\\w-]+/g) || []))
-    .length
-})`);
-```
-
-### 📸 Screenshots
-PNG and JPEG capture. Full-page or viewport-only. Clip to specific regions. Quality control for JPEG compression.
-
-```typescript
-const shot = await client.screenshot({ format: "png", fullPage: true });
-// → { data: "<base64>", format: "png", width: 1440, height: 3200 }
-```
-
-### 🌐 Network Monitoring
-Capture all fetch and XHR requests automatically. Filter by URL pattern. Inspect method, URL, headers, and timing.
-
-```typescript
-await client.enableNetworkCapture();
-await client.navigate("https://api.example.com");
-const requests = await client.getNetworkRequests("api.example.com");
-// → [{ method: "GET", url: "...", status: 200, timing: 142 }]
-```
-
-### 🍪 Cookie & Storage Management
-Read, set, and clear cookies. Full localStorage and sessionStorage access.
-
-```typescript
-const cookies = await client.getCookies();
-await client.setCookie("session", "abc123");
-await client.setLocalStorage("theme", "dark");
-const theme = await client.evaluate("localStorage.getItem('theme')");
-```
-
-### 📁 File Upload
-Upload files to file input elements via CDP. No physical keyboard or mouse — pure protocol-level.
-
-```typescript
-await client.uploadFile("e7", ["/path/to/resume.pdf"]);
-```
-
-### 🗂️ Multi-Tab Management
-List, open, switch, and close tabs. Tab-aware actions across any open tab.
-
-```typescript
-const tabs = await client.tabs();
-await client.newTab("https://example.com");
-await client.switchTab(tabs[0].targetId);
-await client.closeTab(tabs[1].targetId);
-```
-
-### ⏳ Smart Wait Conditions
-Wait for elements, navigation, or custom JS conditions. No more `sleep()`.
-
-```typescript
-await client.waitForSelector("button.submit", 10000);
-await client.waitForNavigation(5000);
-await client.waitForFunction("document.readyState === 'complete'");
-```
-
-### 🔄 Stale Element Recovery
-DOM mutations invalidate element references in SPAs. Tivana auto-retries failed actions by re-enumerating elements — transparent to the developer.
-
-### 💾 Session Persistence
-Sessions survive runtime restarts. Reattach to existing Chrome tabs on reconnect. Pick up where you left off.
-
-### 🔌 Flexible Connection
-Launch a new Chrome instance or connect to an existing one via `--connect`. WebSocket heartbeat with auto-reconnect and exponential backoff.
-
-```bash
-# Launch fresh Chrome
-tivana
-
-# Connect to existing Chrome
-tivana --connect 9222
-```
-
-### 🌍 Proxy & IP Rotation
-HTTP, HTTPS, and SOCKS5 proxy support. Proxy pool with round-robin rotation. Authenticated proxy support. Session-level configuration.
-
-```typescript
-await client.setProxy({ server: "proxy.example.com:8080", protocol: "http" });
-await client.setProxyPool([
-  { server: "us.proxy.com:8080", protocol: "socks5" },
-  { server: "eu.proxy.com:8080", protocol: "socks5" }
-]);
-await client.rotateProxy();
-```
-
-### 🛡️ Error Recovery
-Auto-handle JavaScript dialogs (alerts, confirms, prompts). Navigation resilience with DOMContentLoaded detection. Graceful degradation on page destruction.
-
-### 🏗️ Developer Experience
-- **Zero config** — install and go, no setup wizard
-- **TypeScript SDK** with full type safety
-- **One WebSocket** connection, simple JSON protocol
-- **No paid services**, no API keys, no BYOB
-- **MIT licensed**
-
----
-
-## Getting Started
-
-### Prerequisites
-
-- **Rust** 1.75+ ([install](https://rustup.rs))
-- **Bun** 1.0+ ([install](https://bun.sh)) or Node.js 18+
-- **Chromium** browser (Chrome, Edge, Brave, or Arc)
-
-### 1. Clone and Build
-
-```bash
-git clone https://github.com/Mostrom-LLC/tivana.git
-cd tivana
-
-cd runtime
-cargo build --release
-```
-
-### 2. Start the Runtime
-
-```bash
-./target/release/tivana
-
-# Options:
-#   --headless         Run without browser window
-#   --port 8080        Custom port (default: 9876)
-#   --connect 9222     Connect to existing Chrome
-```
-
-### 3. Install the SDK
-
-```bash
-cd tivana/sdk/ts
-bun install
-
-# Future: npm install tivana
-```
-
-### 4. Connect and Interact
-
-```typescript
-import { TivanaClient } from "./sdk/ts/src/index.js";
-
-const client = new TivanaClient();
-await client.connect();
-await client.createSession();
-
-await client.navigate("https://github.com");
-const state = await client.pageState();
+const page = await client.pageState();
 const elements = await client.elements();
 
-console.log(`URL: ${state.url}`);
-console.log(`Elements: ${elements.length}`);
+console.log(page.url);
+console.log(elements.map((el) => `${el.id} ${el.role} ${el.name ?? ""}`));
 
-const signIn = elements.find(e => e.name?.includes("Sign in"));
-if (signIn) await client.click(signIn.id);
+// Your agent decides what to do from the current page state.
+const target = elements.find((el) => el.role === "link" && el.name?.includes("More information"));
+
+if (target) {
+  await client.click(target.id);
+}
 
 await client.closeSession();
 client.disconnect();
 ```
 
----
+## Example Agent Loop
 
-## SDK API Reference
+Illustrative only. The important point is where the reasoning lives.
 
-### Session Management
 ```typescript
-await client.createSession({ headless: true });
-await client.closeSession();
-const sessions = await client.listSessions();
-```
+import { TivanaClient } from "tivana";
 
-### Perception
-```typescript
-const state = await client.pageState();
-const elements = await client.elements();
-const text = await client.textContent();
-const result = await client.evaluate("document.title");
-const shot = await client.screenshot({ format: "png" });
-```
+type AgentDecision =
+  | { type: "click"; target: string }
+  | { type: "type"; target: string; text: string }
+  | { type: "navigate"; url: string }
+  | { type: "done"; summary: string };
 
-### Actions
-```typescript
-await client.navigate("https://example.com");
-await client.click("e5");
-await client.type("hello", "e3");
-await client.press("Enter");
-await client.scroll("down", 300);
-await client.uploadFile("e7", ["/path/to/file.pdf"]);
-```
+async function decideWithModel(input: {
+  goal: string;
+  page: unknown;
+  elements: unknown;
+}): Promise<AgentDecision> {
+  // Send Tivana perception to your model here.
+  throw new Error("Implement model call");
+}
 
-### Batch & Form Fill
-```typescript
-await client.batch([
-  { type: "click", target: "e5" },
-  { type: "type", target: "e5", text: "hello" }
-]);
-await client.fillForm({ "e5": "value", "e8": true }, "e12");
-```
+const client = new TivanaClient();
+await client.connect("ws://localhost:9876");
+await client.createSession();
 
-### Wait Conditions
-```typescript
-await client.waitForSelector("button.submit");
-await client.waitForNavigation();
-await client.waitForFunction("window.loaded === true");
-```
+const goal = "Sign in if a sign-in form is present.";
 
-### Network & Storage
-```typescript
-await client.enableNetworkCapture();
-const requests = await client.getNetworkRequests();
-const cookies = await client.getCookies();
-await client.setCookie("key", "value");
-await client.setLocalStorage("key", "value");
-```
+for (let step = 0; step < 20; step++) {
+  const [page, elements] = await Promise.all([
+    client.pageState(),
+    client.elements(),
+  ]);
 
-### Tabs
-```typescript
-const tabs = await client.tabs();
-await client.newTab("https://example.com");
-await client.switchTab(targetId);
-await client.closeTab(targetId);
-```
+  const decision = await decideWithModel({ goal, page, elements });
 
-### Proxy
-```typescript
-await client.setProxy({ server: "host:port", protocol: "socks5" });
-await client.setProxyPool(proxies);
-await client.rotateProxy();
-```
+  if (decision.type === "done") {
+    console.log(decision.summary);
+    break;
+  }
 
----
+  if (decision.type === "navigate") {
+    await client.navigate(decision.url);
+    continue;
+  }
+
+  if (decision.type === "click") {
+    await client.click(decision.target);
+    continue;
+  }
+
+  if (decision.type === "type") {
+    await client.type(decision.text, decision.target);
+  }
+}
+```
 
 ## Architecture
 
-```
+```text
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Browser    │────►│   Runtime    │────►│    Agent     │
-│  (Chromium)  │◄────│   (Rust)     │◄────│  (TS SDK)    │
+│   Browser    │<--->│   Runtime    │<--->│    Agent     │
+│  (Chromium)  │     │   (Tivana)   │     │  (LLM/Code)  │
 └──────────────┘     └──────────────┘     └──────────────┘
-     CDP              WebSocket             Your Code
 ```
 
-- **Runtime**: Rust + CDP (chromiumoxide, tokio) — fast, safe, concurrent
-- **SDK**: TypeScript — type-safe, auto-reconnect, event-driven
-- **Protocol**: JSON over WebSocket on port 9876
+- Runtime: Rust, WebSocket, protocol routing, browser integration.
+- Browser transport: managed Chromium and extension-backed sessions currently exist.
+- Agent surface: TypeScript SDK today, protocol is transportable to other agent clients.
+- Design intent: perception first, actions second.
 
----
+## Use Cases
+
+- Exploratory QA
+- accessibility review
+- semantic browsing by coding agents
+- visual anomaly detection
+- flow validation where the agent must adapt instead of following a rigid script
+
+## Current Project Direction
+
+The runtime and SDK already have solid Perceive + Act primitives. The next focus is making the agent loop first-class:
+
+- observation should be the default integration path
+- mutation/event streaming should be explicit and ergonomic in the SDK
+- examples and demos should show agent judgment, not hardcoded site scripts
+
+See [tasks/refocus-plan.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/tasks/refocus-plan.md) for the reset plan.
+
+## Repository Map
+
+- [docs/what-it-is.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/docs/what-it-is.md)
+- [docs/protocol-specification.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/docs/protocol-specification.md)
+- [docs/architecture.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/docs/architecture.md)
+- [docs/use-cases.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/docs/use-cases.md)
+- [sdk/ts/README.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/sdk/ts/README.md)
 
 ## Running Tests
 
 ```bash
-# Rust unit tests
-cd runtime && cargo test
+cd runtime
+cargo test
 
-# Integration tests (requires Chromium)
+# Browser-dependent tests
 cargo test --test browser_test -- --ignored --nocapture
-
-# Realistic browser tests (uses the-internet.herokuapp.com)
 cargo test --test realistic_browser_test -- --ignored --nocapture --test-threads=1
 ```
 
----
-
-## Benchmark
-
-```
-8/8 capability tests passed in 15.3 seconds:
-
-✅ Bot Detection          3.2s   55/56 tests passed
-✅ Design Token Extract   1.9s   113 CSS custom properties extracted
-✅ Screenshot             0.16s  160KB PNG captured
-✅ Network Capture        2.1s   Request interception working
-✅ Cookie & Storage       0.004s Round-trip in 4ms
-✅ Wait Conditions        0.42s  Element found via polling
-✅ Batch Speed            2.3s   3 actions in single roundtrip
-✅ JS Evaluation          0.001s Full page audit in 1ms
-```
-
----
-
 ## License
 
-MIT © [Mostrom LLC](https://github.com/Mostrom-LLC) 2025
+MIT © Mostrom LLC 2025

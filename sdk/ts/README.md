@@ -1,162 +1,191 @@
 # Tivana TypeScript SDK
 
-TypeScript/JavaScript SDK for Tivana - streaming browser perception protocol for AI agents.
+TypeScript client for Tivana's browser perception protocol.
+
+Use this SDK when you want an agent runner to:
+
+1. inspect the current page semantically
+2. decide what to do next
+3. act through Tivana
+4. repeat
+
+The SDK is not meant to be a place for site-specific automation logic. Tivana provides perception and action primitives; your agent provides the reasoning.
 
 ## Installation
 
 ```bash
 npm install tivana
-# or
-bun add tivana
 ```
 
 For local development:
+
 ```bash
 cd sdk/ts
-bun install  # or npm install
+bun install
 ```
 
-## Quick Start
+## Recommended Usage
+
+Use `TivanaClient` directly for explicit agent loops.
 
 ```typescript
 import { TivanaClient } from "tivana";
 
-// Connect to runtime
-const client = new TivanaClient();
-await client.connect("ws://localhost:9876");
+const client = new TivanaClient({ url: "ws://localhost:9876" });
+await client.connect();
+await client.createSession();
 
-// Create browser session
-const sessionId = await client.createSession();
-console.log(`Session: ${sessionId}`);
-
-// Navigate
 await client.navigate("https://example.com");
 
-// Get page state
-const state = await client.pageState();
-console.log(`URL: ${state.url}`);
-console.log(`Title: ${state.title}`);
-
-// Get interactive elements
+const page = await client.pageState();
 const elements = await client.elements();
-for (const el of elements) {
-  console.log(`${el.id}: ${el.role} "${el.name}" at (${el.bounds?.x}, ${el.bounds?.y})`);
+
+console.log(page.title);
+console.log(elements.length);
+```
+
+## Example Agent Loop
+
+```typescript
+import { TivanaClient } from "tivana";
+
+type AgentDecision =
+  | { type: "click"; target: string }
+  | { type: "type"; target: string; text: string }
+  | { type: "press"; key: string; modifiers?: string[] }
+  | { type: "navigate"; url: string }
+  | { type: "done"; summary: string };
+
+async function decideWithModel(input: {
+  goal: string;
+  profile: Record<string, unknown>;
+  page: unknown;
+  elements: unknown;
+}): Promise<AgentDecision> {
+  // Call your model here with Tivana perception.
+  throw new Error("Implement model call");
 }
 
-// Take actions
-await client.click("e5"); // Click by element ID
-await client.click({ role: "button", label: "Submit" }); // Click by selector
-await client.type("hello world", "e3"); // Type into element
+const client = new TivanaClient();
+await client.connect("ws://localhost:9876");
+await client.createSession();
 
-// Subscribe to mutations
-const unsubscribe = client.onMutation((events) => {
-  for (const event of events) {
-    console.log(`Mutation: ${event.type}`);
+const goal = "Complete the current flow using the provided profile.";
+const profile = {
+  sponsorshipRequired: false,
+  authorizedToWork: true,
+};
+
+for (let step = 0; step < 30; step++) {
+  const [page, elements] = await Promise.all([
+    client.pageState(),
+    client.elements(),
+  ]);
+
+  const decision = await decideWithModel({ goal, profile, page, elements });
+
+  if (decision.type === "done") {
+    console.log(decision.summary);
+    break;
   }
-});
 
-// Cleanup
-await client.closeSession();
-client.disconnect();
+  if (decision.type === "navigate") {
+    await client.navigate(decision.url);
+    continue;
+  }
+
+  if (decision.type === "click") {
+    await client.click(decision.target);
+    continue;
+  }
+
+  if (decision.type === "type") {
+    await client.type(decision.text, decision.target);
+    continue;
+  }
+
+  if (decision.type === "press") {
+    await client.press(decision.key, decision.modifiers);
+  }
+}
 ```
 
-## Convenience API
+## Core API
 
-For simpler use cases:
+### Session
+
+- `connect(url?)`
+- `createSession(params?)`
+- `closeSession()`
+- `listSessions()`
+- `disconnect()`
+
+### Perception
+
+- `pageState()`
+- `elements()`
+- `accessibilitySnapshot()`
+- `textContent()`
+- `metadata()`
+- `findElements(selector)`
+- `formFields()`
+
+These methods are the heart of Tivana. Most agent integrations should start here.
+
+### Actions
+
+- `navigate(url)`
+- `click(target, options?)`
+- `type(text, target?, options?)`
+- `press(key, modifiers?)`
+- `scroll(target?, direction?, options?)`
+- `hover(target)`
+- `focus(target)`
+- `select(target, value)`
+- `waitFor(condition, timeoutMs?)`
+
+These actions should be driven by current perception, not by brittle hardcoded assumptions.
+
+## Secondary API
+
+Available, but not the primary product story:
+
+- `evaluate(expression, awaitPromise?)`
+- `evaluateVoid(expression)`
+- `screenshot(options?)`
+- `enableNetworkCapture()`
+- `getNetworkRequests(urlPattern?)`
+- tab management helpers
+- cookies and storage helpers
+- extension-backed session helpers
+
+## Mutation and Observation Notes
+
+The runtime supports mutation/event streaming, and the SDK exposes `onMutation(callback)`.
+
+Current recommendation:
+
+- use explicit `pageState()` + `elements()` loops for now
+- treat mutation callbacks as an advanced hook
+- avoid building integration logic around brittle polling or site-specific scripts
+
+The refocus plan is to make observation/subscription lifecycle first-class in the SDK.
+
+## Targets
+
+The SDK supports semantic targets for actions:
 
 ```typescript
-import { connect, observe, act } from "tivana";
-
-// Connect and create session in one step
-await connect("ws://localhost:9876");
-
-// Observe page state (called on load and mutations)
-observe((state, elements) => {
-  console.log(`Now at: ${state.url}`);
-  console.log(`Elements: ${elements.length}`);
-});
-
-// Take actions
-await act.navigate("https://example.com");
-await act.click("e3");
-await act.type("hello");
-await act.scroll("e10");
+await client.click("e5");
+await client.click({ role: "button", label: "Continue" });
+await client.type("hello@example.com", "e3");
 ```
 
-## Running the Smoke Test
+Prefer element IDs from `elements()` as the primary target model.
 
-```bash
-# Start the runtime first
-./target/release/tivana &
+## Types
 
-# Run the smoke test
-cd sdk/ts
-bun run smoke-test.ts
-# or
-npx tsx smoke-test.ts
-```
-
-## Requirements
-
-- **Runtime**: Tivana runtime must be running (`./target/release/tivana`)
-- **Node.js**: 18+ (uses native WebSocket or `ws` package)
-- **Bun**: 1.0+ (uses native WebSocket)
-
-## API Reference
-
-### TivanaClient
-
-The main client class for connecting to Tivana.
-
-#### Constructor
-
-```typescript
-const client = new TivanaClient({
-  url: "ws://localhost:9876", // Default URL
-  timeout: 30000,             // Request timeout (ms)
-  autoReconnect: false,       // Auto-reconnect on disconnect
-  reconnectDelay: 1000,       // Delay between reconnect attempts
-});
-```
-
-#### Connection Methods
-
-- `connect(url?)` - Connect to runtime
-- `disconnect()` - Disconnect from runtime
-- `isConnected()` - Check connection status
-
-#### Session Methods
-
-- `createSession(params?)` - Create browser session (launches Chromium)
-- `closeSession()` - Close current session
-- `listSessions()` - List all sessions
-- `getSessionId()` - Get current session ID
-
-#### Perception Methods
-
-- `pageState()` - Get current page state (URL, title, scroll, viewport)
-- `elements()` - Get interactive elements with visual data
-- `accessibilitySnapshot()` - Get full accessibility tree
-- `textContent()` - Get page text content
-- `metadata()` - Get page metadata (title, description, og:image, etc.)
-- `findElements(selector)` - Find elements by CSS selector
-- `onMutation(callback)` - Subscribe to DOM mutations (returns unsubscribe fn)
-
-#### Action Methods
-
-- `navigate(url)` - Navigate to URL
-- `click(target, options?)` - Click element by ID, selector, or role+label
-- `type(text, target?, options?)` - Type text into element
-- `press(key, modifiers?)` - Press a key or key combination
-- `scroll(target?, direction?, options?)` - Scroll page or element
-- `hover(target)` - Hover over element
-- `focus(target)` - Focus element
-- `select(target, value)` - Select dropdown option
-- `waitFor(condition, timeoutMs?)` - Wait for condition
-
-### Types
-
-#### PageState
+### PageState
 
 ```typescript
 interface PageState {
@@ -173,49 +202,42 @@ interface PageState {
 }
 ```
 
-#### Element
+### Element
 
 ```typescript
 interface Element {
-  id: string;              // Stable ID (e.g., "e1", "e2")
-  role: string;            // Accessibility role
-  name?: string;           // Accessible name/label
-  value?: string;          // Form element value
-  description?: string;    // Accessible description
-
-  bounds?: BoundingBox;    // Position and size
-  styles?: ElementStyles;  // Computed styles
-
+  id: string;
+  role: string;
+  name?: string;
+  value?: string;
+  description?: string;
+  bounds?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  styles?: {
+    fontFamily?: string;
+    fontSize?: string;
+    fontWeight?: string;
+    color?: string;
+    backgroundColor?: string;
+    border?: string;
+    display?: string;
+    visibility?: string;
+  };
   focused: boolean;
   enabled: boolean;
   checked?: boolean;
   selected?: boolean;
   expanded?: boolean;
   required?: boolean;
-
   children?: Element[];
-}
-
-interface BoundingBox {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-interface ElementStyles {
-  fontFamily?: string;
-  fontSize?: string;
-  fontWeight?: string;
-  color?: string;
-  backgroundColor?: string;
-  border?: string;
-  display?: string;
-  visibility?: string;
 }
 ```
 
-#### ActionResult
+### ActionResult
 
 ```typescript
 interface ActionResult {
@@ -226,51 +248,37 @@ interface ActionResult {
 }
 ```
 
-#### Mutations
+## Error Handling
 
-```typescript
-type MutationEvent =
-  | { type: "Added"; elementId: string; parentId?: string }
-  | { type: "Removed"; elementId: string }
-  | { type: "Changed"; elementId: string; attribute: string; oldValue?: string; newValue?: string }
-  | { type: "TextChanged"; elementId: string; text: string };
-```
-
-### Error Handling
-
-Errors are thrown with structured codes:
+Errors are surfaced with structured codes:
 
 ```typescript
 try {
   await client.click("e999");
-} catch (e) {
-  // Error: [target_not_found] Element not found: e999
-  console.error(e.message);
+} catch (error) {
+  console.error(String(error));
 }
 ```
 
-Error codes:
-- Protocol errors: `invalid_message`, `missing_field`, `unknown_method`
-- Session errors: `session_not_found`, `session_closed`
-- Browser errors: `browser_launch_failed`, `browser_crashed`
-- Action errors: `target_not_found`, `target_ambiguous`, `action_failed`
-- Internal errors: `internal_error`
+Common categories:
+
+- protocol errors
+- session errors
+- browser errors
+- action errors
+- internal errors
 
 ## Runtime
 
-The SDK requires the Tivana runtime to be running. See the main README for runtime installation and startup.
+The SDK requires the Tivana runtime to be running.
 
 ```bash
-# Build the runtime
-cd tivana
+cd tivana/runtime
 cargo build --release
-
-# Start runtime
 ./target/release/tivana --port 9876
-
-# With options
-./target/release/tivana --headless --port 8080
 ```
+
+See the root [README.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/README.md) for the broader project direction.
 
 ## License
 
