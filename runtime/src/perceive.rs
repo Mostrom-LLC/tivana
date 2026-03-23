@@ -263,6 +263,208 @@ impl PageEventHandle {
     }
 }
 
+/// JS script to install page event listeners in the browser page.
+/// Writes events to `window.__tivana_page_events` array.
+pub const PAGE_EVENTS_INSTALL_SCRIPT: &str = r#"(() => {
+    if (window.__tivana_page_events) return { status: 'already_running' };
+    window.__tivana_page_events = [];
+
+    let lastUrl = window.location.href;
+    let scrollTimer = null;
+
+    // Focus change
+    document.addEventListener('focusin', (e) => {
+        const el = e.target;
+        const id = el?.dataset?.tivanaId || null;
+        const role = el?.getAttribute?.('role') || el?.tagName?.toLowerCase() || null;
+        const name = el?.getAttribute?.('aria-label') || el?.textContent?.slice(0, 50)?.trim() || null;
+        window.__tivana_page_events.push({
+            type: 'focus',
+            elementId: id,
+            role: role,
+            name: name,
+            timestampMs: Date.now()
+        });
+    }, true);
+
+    // Scroll (throttled to 200ms)
+    window.addEventListener('scroll', () => {
+        if (scrollTimer) return;
+        scrollTimer = setTimeout(() => {
+            scrollTimer = null;
+            window.__tivana_page_events.push({
+                type: 'scroll',
+                scrollX: window.scrollX,
+                scrollY: window.scrollY,
+                timestampMs: Date.now()
+            });
+        }, 200);
+    }, { passive: true });
+
+    // Resize
+    window.addEventListener('resize', () => {
+        window.__tivana_page_events.push({
+            type: 'resize',
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+            timestampMs: Date.now()
+        });
+    });
+
+    // Navigation: popstate, hashchange
+    const pushNav = () => {
+        const newUrl = window.location.href;
+        if (newUrl !== lastUrl) {
+            const prev = lastUrl;
+            lastUrl = newUrl;
+            window.__tivana_page_events.push({
+                type: 'navigated',
+                url: newUrl,
+                previousUrl: prev,
+                timestampMs: Date.now()
+            });
+        }
+    };
+    window.addEventListener('popstate', pushNav);
+    window.addEventListener('hashchange', pushNav);
+
+    // Intercept pushState/replaceState
+    const origPush = history.pushState;
+    const origReplace = history.replaceState;
+    history.pushState = function() {
+        origPush.apply(this, arguments);
+        pushNav();
+    };
+    history.replaceState = function() {
+        origReplace.apply(this, arguments);
+        pushNav();
+    };
+
+    // Page load
+    window.addEventListener('load', () => {
+        window.__tivana_page_events.push({
+            type: 'loaded',
+            url: window.location.href,
+            title: document.title || null,
+            timestampMs: Date.now()
+        });
+    });
+
+    return { status: 'started' };
+})()"#;
+
+/// JS script to poll and drain collected page events.
+pub const PAGE_EVENTS_POLL_SCRIPT: &str = r#"(() => {
+    const events = window.__tivana_page_events || [];
+    window.__tivana_page_events = [];
+    return events;
+})()"#;
+
+/// JS script to stop page event collection.
+pub const PAGE_EVENTS_CLEANUP_SCRIPT: &str = r#"(() => {
+    delete window.__tivana_page_events;
+    return { status: 'stopped' };
+})()"#;
+
+/// JS script to install the MutationObserver in the browser page.
+/// Writes mutations to `window.__tivana_mutations` array.
+pub const MUTATION_OBSERVER_INSTALL_SCRIPT: &str = r#"(() => {
+    // Store mutations in a global array
+    window.__tivana_mutations = window.__tivana_mutations || [];
+    window.__tivana_element_counter = window.__tivana_element_counter || 1;
+
+    // Helper to get or create element ID
+    const getElementId = (el) => {
+        if (!el || el.nodeType !== 1) return null;
+        if (!el.dataset.tivanaId) {
+            el.dataset.tivanaId = 'e' + (window.__tivana_element_counter++);
+        }
+        return el.dataset.tivanaId;
+    };
+
+    // Skip if observer already exists
+    if (window.__tivana_observer) {
+        return { status: 'already_running' };
+    }
+
+    // Create the MutationObserver
+    window.__tivana_observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+            const targetId = getElementId(mutation.target);
+
+            if (mutation.type === 'childList') {
+                // Handle added nodes
+                for (const node of mutation.addedNodes) {
+                    if (node.nodeType === 1) { // Element node
+                        const id = getElementId(node);
+                        const parentId = getElementId(node.parentElement);
+                        window.__tivana_mutations.push({
+                            type: 'added',
+                            elementId: id,
+                            parentId: parentId
+                        });
+                    }
+                }
+
+                // Handle removed nodes
+                for (const node of mutation.removedNodes) {
+                    if (node.nodeType === 1) {
+                        const id = node.dataset?.tivanaId || 'unknown';
+                        window.__tivana_mutations.push({
+                            type: 'removed',
+                            elementId: id
+                        });
+                    }
+                }
+            } else if (mutation.type === 'attributes') {
+                window.__tivana_mutations.push({
+                    type: 'changed',
+                    elementId: targetId,
+                    attribute: mutation.attributeName,
+                    oldValue: mutation.oldValue,
+                    newValue: mutation.target.getAttribute(mutation.attributeName)
+                });
+            } else if (mutation.type === 'characterData') {
+                const parentId = getElementId(mutation.target.parentElement);
+                window.__tivana_mutations.push({
+                    type: 'textChanged',
+                    elementId: parentId || 'unknown',
+                    text: mutation.target.textContent
+                });
+            }
+        }
+    });
+
+    // Start observing
+    window.__tivana_observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeOldValue: true,
+        characterData: true,
+        characterDataOldValue: true
+    });
+
+    return { status: 'started' };
+})()"#;
+
+/// JS script to poll and drain collected mutations.
+pub const MUTATION_POLL_SCRIPT: &str = r#"(() => {
+    const mutations = window.__tivana_mutations || [];
+    window.__tivana_mutations = [];
+    return mutations;
+})()"#;
+
+/// JS script to stop the MutationObserver.
+pub const MUTATION_CLEANUP_SCRIPT: &str = r#"(() => {
+    if (window.__tivana_observer) {
+        window.__tivana_observer.disconnect();
+        delete window.__tivana_observer;
+    }
+    delete window.__tivana_mutations;
+    return { status: 'stopped' };
+})()"#;
+
 /// Install page event listeners and start polling them
 ///
 /// Injects JS listeners for focus, scroll, popstate, hashchange, load, resize.
@@ -272,96 +474,8 @@ pub async fn setup_page_events(
 ) -> Result<(mpsc::Receiver<PageEvent>, PageEventHandle), PerceptionError> {
     debug!("Setting up page event listeners");
 
-    let install_script = r#"(() => {
-        if (window.__tivana_page_events) return { status: 'already_running' };
-        window.__tivana_page_events = [];
-
-        let lastUrl = window.location.href;
-        let scrollTimer = null;
-
-        // Focus change
-        document.addEventListener('focusin', (e) => {
-            const el = e.target;
-            const id = el?.dataset?.tivanaId || null;
-            const role = el?.getAttribute?.('role') || el?.tagName?.toLowerCase() || null;
-            const name = el?.getAttribute?.('aria-label') || el?.textContent?.slice(0, 50)?.trim() || null;
-            window.__tivana_page_events.push({
-                type: 'focus',
-                elementId: id,
-                role: role,
-                name: name,
-                timestampMs: Date.now()
-            });
-        }, true);
-
-        // Scroll (throttled to 200ms)
-        window.addEventListener('scroll', () => {
-            if (scrollTimer) return;
-            scrollTimer = setTimeout(() => {
-                scrollTimer = null;
-                window.__tivana_page_events.push({
-                    type: 'scroll',
-                    scrollX: window.scrollX,
-                    scrollY: window.scrollY,
-                    timestampMs: Date.now()
-                });
-            }, 200);
-        }, { passive: true });
-
-        // Resize
-        window.addEventListener('resize', () => {
-            window.__tivana_page_events.push({
-                type: 'resize',
-                viewportWidth: window.innerWidth,
-                viewportHeight: window.innerHeight,
-                timestampMs: Date.now()
-            });
-        });
-
-        // Navigation: popstate, hashchange
-        const pushNav = () => {
-            const newUrl = window.location.href;
-            if (newUrl !== lastUrl) {
-                const prev = lastUrl;
-                lastUrl = newUrl;
-                window.__tivana_page_events.push({
-                    type: 'navigated',
-                    url: newUrl,
-                    previousUrl: prev,
-                    timestampMs: Date.now()
-                });
-            }
-        };
-        window.addEventListener('popstate', pushNav);
-        window.addEventListener('hashchange', pushNav);
-
-        // Intercept pushState/replaceState
-        const origPush = history.pushState;
-        const origReplace = history.replaceState;
-        history.pushState = function() {
-            origPush.apply(this, arguments);
-            pushNav();
-        };
-        history.replaceState = function() {
-            origReplace.apply(this, arguments);
-            pushNav();
-        };
-
-        // Page load
-        window.addEventListener('load', () => {
-            window.__tivana_page_events.push({
-                type: 'loaded',
-                url: window.location.href,
-                title: document.title || null,
-                timestampMs: Date.now()
-            });
-        });
-
-        return { status: 'started' };
-    })()"#;
-
     let result: serde_json::Value = page
-        .evaluate(install_script)
+        .evaluate(PAGE_EVENTS_INSTALL_SCRIPT)
         .await
         .map_err(|e| PerceptionError(format!("Failed to install page event listeners: {}", e)))?;
 
@@ -372,18 +486,12 @@ pub async fn setup_page_events(
     let page_clone = Arc::clone(page);
 
     tokio::spawn(async move {
-        let poll_script = r#"(() => {
-            const events = window.__tivana_page_events || [];
-            window.__tivana_page_events = [];
-            return events;
-        })()"#;
-
         let mut interval = tokio::time::interval(Duration::from_millis(100));
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    match page_clone.evaluate::<Vec<serde_json::Value>>(poll_script).await {
+                    match page_clone.evaluate::<Vec<serde_json::Value>>(PAGE_EVENTS_POLL_SCRIPT).await {
                         Ok(events) => {
                             for event_json in events {
                                 if let Some(event) = parse_page_event(&event_json) {
@@ -399,11 +507,7 @@ pub async fn setup_page_events(
                     }
                 }
                 _ = &mut shutdown_rx => {
-                    let cleanup_script = r#"(() => {
-                        delete window.__tivana_page_events;
-                        return { status: 'stopped' };
-                    })()"#;
-                    let _ = page_clone.evaluate::<serde_json::Value>(cleanup_script).await;
+                    let _ = page_clone.evaluate::<serde_json::Value>(PAGE_EVENTS_CLEANUP_SCRIPT).await;
                     debug!("Page event listeners stopped");
                     return;
                 }
@@ -416,7 +520,7 @@ pub async fn setup_page_events(
 }
 
 /// Parse a page event from JavaScript JSON
-fn parse_page_event(value: &serde_json::Value) -> Option<PageEvent> {
+pub fn parse_page_event(value: &serde_json::Value) -> Option<PageEvent> {
     let event_type = value.get("type")?.as_str()?;
     let timestamp_ms = value.get("timestampMs")?.as_u64()?;
 
@@ -455,12 +559,7 @@ fn parse_page_event(value: &serde_json::Value) -> Option<PageEvent> {
 pub async fn stop_page_events(page: &Arc<PageHandle>) -> Result<(), PerceptionError> {
     debug!("Stopping page event listeners");
 
-    let cleanup_script = r#"(() => {
-        delete window.__tivana_page_events;
-        return { status: 'stopped' };
-    })()"#;
-
-    page.evaluate::<serde_json::Value>(cleanup_script)
+    page.evaluate::<serde_json::Value>(PAGE_EVENTS_CLEANUP_SCRIPT)
         .await
         .map_err(|e| PerceptionError(format!("Failed to stop page events: {}", e)))?;
 
@@ -508,123 +607,28 @@ pub async fn setup_mutation_observer(
 ) -> Result<(mpsc::Receiver<MutationEvent>, MutationObserverHandle), PerceptionError> {
     debug!("Setting up mutation observer");
 
-    // Install the JavaScript MutationObserver
-    let install_script = r#"(() => {
-        // Store mutations in a global array
-        window.__tivana_mutations = window.__tivana_mutations || [];
-        window.__tivana_element_counter = window.__tivana_element_counter || 1;
-
-        // Helper to get or create element ID
-        const getElementId = (el) => {
-            if (!el || el.nodeType !== 1) return null;
-            if (!el.dataset.tivanaId) {
-                el.dataset.tivanaId = 'e' + (window.__tivana_element_counter++);
-            }
-            return el.dataset.tivanaId;
-        };
-
-        // Skip if observer already exists
-        if (window.__tivana_observer) {
-            return { status: 'already_running' };
-        }
-
-        // Create the MutationObserver
-        window.__tivana_observer = new MutationObserver((mutations) => {
-            for (const mutation of mutations) {
-                const targetId = getElementId(mutation.target);
-
-                if (mutation.type === 'childList') {
-                    // Handle added nodes
-                    for (const node of mutation.addedNodes) {
-                        if (node.nodeType === 1) { // Element node
-                            const id = getElementId(node);
-                            const parentId = getElementId(node.parentElement);
-                            window.__tivana_mutations.push({
-                                type: 'added',
-                                elementId: id,
-                                parentId: parentId
-                            });
-                        }
-                    }
-
-                    // Handle removed nodes
-                    for (const node of mutation.removedNodes) {
-                        if (node.nodeType === 1) {
-                            const id = node.dataset?.tivanaId || 'unknown';
-                            window.__tivana_mutations.push({
-                                type: 'removed',
-                                elementId: id
-                            });
-                        }
-                    }
-                } else if (mutation.type === 'attributes') {
-                    window.__tivana_mutations.push({
-                        type: 'changed',
-                        elementId: targetId,
-                        attribute: mutation.attributeName,
-                        oldValue: mutation.oldValue,
-                        newValue: mutation.target.getAttribute(mutation.attributeName)
-                    });
-                } else if (mutation.type === 'characterData') {
-                    const parentId = getElementId(mutation.target.parentElement);
-                    window.__tivana_mutations.push({
-                        type: 'textChanged',
-                        elementId: parentId || 'unknown',
-                        text: mutation.target.textContent
-                    });
-                }
-            }
-        });
-
-        // Start observing
-        window.__tivana_observer.observe(document.documentElement, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeOldValue: true,
-            characterData: true,
-            characterDataOldValue: true
-        });
-
-        return { status: 'started' };
-    })()"#;
-
     let result: serde_json::Value = page
-        .evaluate(install_script)
+        .evaluate(MUTATION_OBSERVER_INSTALL_SCRIPT)
         .await
         .map_err(|e| PerceptionError(format!("Failed to install mutation observer: {}", e)))?;
 
     debug!(result = ?result, "Mutation observer installed");
 
-    // Create channel for sending mutations
     let (tx, rx) = mpsc::channel::<MutationEvent>(256);
-
-    // Create shutdown channel
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-
-    // Clone page for the polling task
     let page_clone = Arc::clone(page);
 
-    // Spawn polling task
     tokio::spawn(async move {
-        let poll_script = r#"(() => {
-            const mutations = window.__tivana_mutations || [];
-            window.__tivana_mutations = [];
-            return mutations;
-        })()"#;
-
         let mut interval = tokio::time::interval(Duration::from_millis(100));
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    // Poll for mutations
-                    match page_clone.evaluate::<Vec<serde_json::Value>>(poll_script).await {
+                    match page_clone.evaluate::<Vec<serde_json::Value>>(MUTATION_POLL_SCRIPT).await {
                         Ok(mutations) => {
                             for mutation in mutations {
                                 if let Some(event) = parse_mutation_event(&mutation) {
                                     if tx.send(event).await.is_err() {
-                                        // Receiver dropped, stop polling
                                         return;
                                     }
                                 }
@@ -632,22 +636,11 @@ pub async fn setup_mutation_observer(
                         }
                         Err(e) => {
                             warn!(error = %e, "Failed to poll mutations");
-                            // Continue polling despite errors
                         }
                     }
                 }
                 _ = &mut shutdown_rx => {
-                    // Cleanup the observer
-                    let cleanup_script = r#"(() => {
-                        if (window.__tivana_observer) {
-                            window.__tivana_observer.disconnect();
-                            delete window.__tivana_observer;
-                        }
-                        delete window.__tivana_mutations;
-                        return { status: 'stopped' };
-                    })()"#;
-
-                    let _ = page_clone.evaluate::<serde_json::Value>(cleanup_script).await;
+                    let _ = page_clone.evaluate::<serde_json::Value>(MUTATION_CLEANUP_SCRIPT).await;
                     debug!("Mutation observer stopped");
                     return;
                 }
@@ -660,7 +653,7 @@ pub async fn setup_mutation_observer(
 }
 
 /// Parse a mutation event from JavaScript JSON
-fn parse_mutation_event(value: &serde_json::Value) -> Option<MutationEvent> {
+pub fn parse_mutation_event(value: &serde_json::Value) -> Option<MutationEvent> {
     let event_type = value.get("type")?.as_str()?;
 
     match event_type {
@@ -698,16 +691,7 @@ fn parse_mutation_event(value: &serde_json::Value) -> Option<MutationEvent> {
 pub async fn stop_mutation_observer(page: &Arc<PageHandle>) -> Result<(), PerceptionError> {
     debug!("Stopping mutation observer");
 
-    let cleanup_script = r#"(() => {
-        if (window.__tivana_observer) {
-            window.__tivana_observer.disconnect();
-            delete window.__tivana_observer;
-        }
-        delete window.__tivana_mutations;
-        return { status: 'stopped' };
-    })()"#;
-
-    page.evaluate::<serde_json::Value>(cleanup_script)
+    page.evaluate::<serde_json::Value>(MUTATION_CLEANUP_SCRIPT)
         .await
         .map_err(|e| PerceptionError(format!("Failed to stop mutation observer: {}", e)))?;
 
