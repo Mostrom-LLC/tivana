@@ -415,24 +415,232 @@ Condition to wait for:
 
 ---
 
-## Events
+## Observation Model
 
-### page.mutation
+Tivana provides two complementary ways for agents to perceive page state: **full snapshots** (request/response) and **incremental events** (server-push). Together they enable continuous awareness without polling.
 
-Emitted when DOM changes occur:
+### Full Snapshots
 
-```typescript
+Snapshots return complete page state at a point in time. The agent sends a request; the runtime responds with the full result.
+
+| Method | Returns |
+|--------|---------|
+| `perceive.pageState` | Complete PageState (URL, title, scroll, viewport, focus) |
+| `perceive.elements` | Full element tree with visual and semantic data |
+| `perceive.accessibilitySnapshot` | Full accessibility tree |
+| `perceive.textContent` | Full page text content |
+| `perceive.metadata` | Page metadata (title, description, OG tags) |
+| `perceive.findElements` | Elements matching a CSS selector |
+
+**When to use snapshots:**
+- On initial connection to establish baseline state
+- After navigation to get the new page
+- When the agent needs a complete, consistent picture
+- To recover after missed events (see Recovery Model below)
+
+**Wire format — snapshot response:**
+```json
 {
-  event: "page.mutation";
-  data: MutationEvent[];
+  "id": "req-1",
+  "type": "response",
+  "method": "perceive.pageState",
+  "sessionId": "sess-abc",
+  "result": {
+    "url": "https://example.com",
+    "title": "Example Domain",
+    "focusedElementId": null,
+    "scrollX": 0,
+    "scrollY": 0,
+    "viewportWidth": 1280,
+    "viewportHeight": 720,
+    "documentWidth": 1280,
+    "documentHeight": 2400,
+    "timestampMs": 1711234567890
+  },
+  "version": "1.0"
 }
 ```
 
-Where `MutationEvent` is one of:
+### Incremental Events
+
+Events are pushed by the runtime when page state changes. They require an active observation session started with `perceive.observe`.
+
+| Event | Trigger | Throttling |
+|-------|---------|------------|
+| `page.mutation` | DOM changes (added, removed, changed, text) | Batched per flush |
+| `page.loaded` | DOMContentLoaded fires | None |
+| `page.navigated` | URL changes (pushState, popstate, hashchange) | None |
+| `page.focus` | Focused element changes (focusin) | None |
+| `page.scroll` | Scroll position changes | 200ms throttle |
+| `page.resize` | Viewport dimensions change | None |
+
+**Key properties of events:**
+- Events carry **IDs and deltas**, not full element data
+- Events include `timestampMs` for ordering
+- Events are ordered within a session
+- Mutation events may be batched (array of mutations per push)
+- Page events (loaded, navigated, focus, scroll, resize) are sent individually
+
+**Wire format — page event:**
+```json
+{
+  "id": "evt-1",
+  "type": "event",
+  "event": "page.loaded",
+  "sessionId": "sess-abc",
+  "data": {
+    "url": "https://example.com",
+    "title": "Example Domain",
+    "timestampMs": 1711234567890
+  },
+  "version": "1.0"
+}
+```
+
+**Wire format — mutation batch:**
+```json
+{
+  "id": "evt-2",
+  "type": "event",
+  "event": "page.mutation",
+  "sessionId": "sess-abc",
+  "data": [
+    { "type": "Added", "elementId": "e42", "parentId": "e5" },
+    { "type": "Removed", "elementId": "e10" },
+    { "type": "Changed", "elementId": "e3", "attribute": "value", "newValue": "hello" },
+    { "type": "TextChanged", "elementId": "e7", "text": "Updated text" }
+  ],
+  "version": "1.0"
+}
+```
+
+### Observation Lifecycle
+
+Agents control event streaming with two methods:
+
+**perceive.observe** — Start receiving events for a session.
+
+```json
+{
+  "id": "req-10",
+  "type": "request",
+  "method": "perceive.observe",
+  "sessionId": "sess-abc",
+  "params": {}
+}
+```
+
+Response: `{ "id": "req-10", "type": "response", "result": { "observing": true } }`
+
+**perceive.unobserve** — Stop receiving events for a session.
+
+```json
+{
+  "id": "req-11",
+  "type": "request",
+  "method": "perceive.unobserve",
+  "sessionId": "sess-abc",
+  "params": {}
+}
+```
+
+Response: `{ "id": "req-11", "type": "response", "result": { "observing": false } }`
+
+### Recovery Model
+
+If an agent disconnects and reconnects (or suspects it missed events), it should:
+
+1. **Request a full snapshot** (`perceive.pageState` + `perceive.elements`) to re-establish baseline
+2. **Re-start observation** with `perceive.observe`
+3. **Apply subsequent events** on top of the new snapshot
+
+Events do NOT carry enough data to reconstruct full state from scratch. The agent must maintain its own state model by applying incremental events to the last known snapshot.
+
+### Event Ordering
+
+- Events are ordered within a single session — the runtime sends them sequentially
+- `timestampMs` is included on all events for cross-event ordering
+- Mutation events within a single `page.mutation` push are ordered (first mutation happened first)
+- There is no global ordering guarantee across sessions
+
+---
+
+## Events
+
+### page.mutation [Event]
+
+Pushed when DOM changes occur. Requires active observation.
+
+**Event data:** `MutationEvent[]`
 
 ```typescript
 { type: "Added"; elementId: string; parentId?: string }
 { type: "Removed"; elementId: string }
 { type: "Changed"; elementId: string; attribute: string; oldValue?: string; newValue?: string }
 { type: "TextChanged"; elementId: string; text: string }
+```
+
+### page.loaded [Event]
+
+Pushed when DOMContentLoaded fires after navigation.
+
+**Event data:**
+```typescript
+{
+  url: string;
+  title: string;
+  timestampMs: number;
+}
+```
+
+### page.navigated [Event]
+
+Pushed when the URL changes (pushState, replaceState, popstate, hashchange).
+
+**Event data:**
+```typescript
+{
+  url: string;
+  navigationType: "pushState" | "replaceState" | "popstate" | "hashchange";
+  timestampMs: number;
+}
+```
+
+### page.focus [Event]
+
+Pushed when the focused element changes.
+
+**Event data:**
+```typescript
+{
+  elementId: string | null;
+  previousElementId: string | null;
+  timestampMs: number;
+}
+```
+
+### page.scroll [Event]
+
+Pushed when scroll position changes. Throttled to at most one event per 200ms.
+
+**Event data:**
+```typescript
+{
+  scrollX: number;
+  scrollY: number;
+  timestampMs: number;
+}
+```
+
+### page.resize [Event]
+
+Pushed when the viewport dimensions change.
+
+**Event data:**
+```typescript
+{
+  viewportWidth: number;
+  viewportHeight: number;
+  timestampMs: number;
+}
 ```

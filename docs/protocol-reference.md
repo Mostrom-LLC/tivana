@@ -128,9 +128,9 @@ List all active sessions.
 
 ### Perception
 
-#### perceive.pageState
+#### perceive.pageState [Snapshot]
 
-Get current page state.
+Get complete page state at a point in time.
 
 **Request:**
 ```json
@@ -160,9 +160,9 @@ Get current page state.
 }
 ```
 
-#### perceive.elements
+#### perceive.elements [Snapshot]
 
-Get element tree with full visual and semantic data.
+Get full element tree with visual and semantic data.
 
 **Request:**
 ```json
@@ -356,29 +356,184 @@ Scroll element into view.
 }
 ```
 
+### Observation Lifecycle
+
+#### perceive.observe
+
+Start receiving incremental events for a session. Must be called before any events are pushed.
+
+**Request:**
+```json
+{
+  "id": "10",
+  "type": "request",
+  "method": "perceive.observe",
+  "sessionId": "sess-abc",
+  "params": {}
+}
+```
+
+**Response:**
+```json
+{
+  "id": "10",
+  "type": "response",
+  "method": "perceive.observe",
+  "sessionId": "sess-abc",
+  "result": { "observing": true },
+  "version": "1.0"
+}
+```
+
+#### perceive.unobserve
+
+Stop receiving incremental events for a session.
+
+**Request:**
+```json
+{
+  "id": "11",
+  "type": "request",
+  "method": "perceive.unobserve",
+  "sessionId": "sess-abc",
+  "params": {}
+}
+```
+
+**Response:**
+```json
+{
+  "id": "11",
+  "type": "response",
+  "method": "perceive.unobserve",
+  "sessionId": "sess-abc",
+  "result": { "observing": false },
+  "version": "1.0"
+}
+```
+
 ### Events
 
-#### page.mutation
+All events require an active observation session (see `perceive.observe`). Events use the `event` field (not `method`) to identify the event type, and `data` (not `result`) for the payload.
 
-Streamed when DOM changes occur.
+#### page.mutation [Event]
+
+Pushed when DOM changes occur. Data is an array of mutations (batched).
 
 **Event:**
 ```json
 {
   "id": "evt-123",
   "type": "event",
-  "method": "page.mutation",
+  "event": "page.mutation",
   "sessionId": "sess-abc",
-  "result": {
-    "mutations": [
-      { "type": "added", "element": { "id": "e20", "role": "alert", ... } },
-      { "type": "removed", "elementId": "e15" },
-      { "type": "changed", "elementId": "e3", "changes": { "text": "New value" } },
-      { "type": "focusChanged", "previousElement": "e3", "currentElement": "e5" },
-      { "type": "navigation", "url": "https://example.com/page2" }
-    ],
-    "timestamp": 1710422401000
-  }
+  "data": [
+    { "type": "Added", "elementId": "e20", "parentId": "e5" },
+    { "type": "Removed", "elementId": "e15" },
+    { "type": "Changed", "elementId": "e3", "attribute": "class", "oldValue": "active", "newValue": "inactive" },
+    { "type": "TextChanged", "elementId": "e7", "text": "New value" }
+  ],
+  "version": "1.0"
+}
+```
+
+#### page.loaded [Event]
+
+Pushed when DOMContentLoaded fires after a navigation.
+
+**Event:**
+```json
+{
+  "id": "evt-124",
+  "type": "event",
+  "event": "page.loaded",
+  "sessionId": "sess-abc",
+  "data": {
+    "url": "https://example.com/page2",
+    "title": "Page Two",
+    "timestampMs": 1711234567890
+  },
+  "version": "1.0"
+}
+```
+
+#### page.navigated [Event]
+
+Pushed when the URL changes via pushState, replaceState, popstate, or hashchange.
+
+**Event:**
+```json
+{
+  "id": "evt-125",
+  "type": "event",
+  "event": "page.navigated",
+  "sessionId": "sess-abc",
+  "data": {
+    "url": "https://example.com/page2",
+    "navigationType": "pushState",
+    "timestampMs": 1711234567891
+  },
+  "version": "1.0"
+}
+```
+
+#### page.focus [Event]
+
+Pushed when the focused element changes.
+
+**Event:**
+```json
+{
+  "id": "evt-126",
+  "type": "event",
+  "event": "page.focus",
+  "sessionId": "sess-abc",
+  "data": {
+    "elementId": "e5",
+    "previousElementId": "e3",
+    "timestampMs": 1711234567892
+  },
+  "version": "1.0"
+}
+```
+
+#### page.scroll [Event]
+
+Pushed when scroll position changes. Throttled to at most one event per 200ms.
+
+**Event:**
+```json
+{
+  "id": "evt-127",
+  "type": "event",
+  "event": "page.scroll",
+  "sessionId": "sess-abc",
+  "data": {
+    "scrollX": 0,
+    "scrollY": 450,
+    "timestampMs": 1711234567893
+  },
+  "version": "1.0"
+}
+```
+
+#### page.resize [Event]
+
+Pushed when the viewport dimensions change.
+
+**Event:**
+```json
+{
+  "id": "evt-128",
+  "type": "event",
+  "event": "page.resize",
+  "sessionId": "sess-abc",
+  "data": {
+    "viewportWidth": 1024,
+    "viewportHeight": 768,
+    "timestampMs": 1711234567894
+  },
+  "version": "1.0"
 }
 ```
 
