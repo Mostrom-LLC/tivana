@@ -14,6 +14,7 @@ Each example shows a different use case where an agent perceives the page, reaso
 | [04-anomaly-detection](04-anomaly-detection.ts) | Detect visual and structural anomalies | Exploratory QA |
 | [05-form-awareness](05-form-awareness.ts) | Perceive and understand form structure | Semantic form understanding |
 | [06-event-streaming](06-event-streaming.ts) | Real-time page event monitoring | Observation lifecycle |
+| [07-design-token-extraction](07-design-token-extraction.ts) | Extract design tokens from any site | W3C DTCG output |
 
 ## Running
 
