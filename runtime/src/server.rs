@@ -1105,12 +1105,23 @@ impl Server {
                         self.extension_manager.page_state(session_id)
                     ).await;
                     if let Ok(Ok(s)) = state {
+                        // Re-inject observers after navigation (new JS context)
+                        let _ = self.extension_manager.evaluate(session_id, 
+                            crate::perceive::MUTATION_OBSERVER_INSTALL_SCRIPT).await;
+                        let _ = self.extension_manager.evaluate(session_id, 
+                            crate::perceive::PAGE_EVENTS_INSTALL_SCRIPT).await;
                         return Ok(s);
                     }
                     if attempt < 2 {
                         tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
                     }
                 }
+                // Re-inject observers after navigation (new JS context)
+                let _ = self.extension_manager.evaluate(session_id, 
+                    crate::perceive::MUTATION_OBSERVER_INSTALL_SCRIPT).await;
+                let _ = self.extension_manager.evaluate(session_id, 
+                    crate::perceive::PAGE_EVENTS_INSTALL_SCRIPT).await;
+                
                 // Give up on page state, return minimal info
                 Ok(serde_json::json!({"url": url, "title": "unknown", "navigated": true}))
             }
