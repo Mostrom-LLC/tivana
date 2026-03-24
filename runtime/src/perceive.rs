@@ -816,10 +816,8 @@ impl Perceiver {
         let script = r#"(() => {
             const elements = [];
             // Persist element counter across calls for ID stability
-            if (!window.__tivana_element_counter) {
-                window.__tivana_element_counter = 1;
-                window.__tivana_element_map = new WeakMap();
-            }
+            if (!window.__tivana_element_counter) window.__tivana_element_counter = 1;
+            if (!window.__tivana_element_map) window.__tivana_element_map = new WeakMap();
 
             const getStableId = (el) => {
                 let id = window.__tivana_element_map.get(el);
@@ -1041,10 +1039,8 @@ pub fn elements_script() -> String {
     // Same script as Perceiver::elements, but wrapped to return JSON string
     r#"JSON.stringify((() => {
             const elements = [];
-            if (!window.__tivana_element_counter) {
-                window.__tivana_element_counter = 1;
-                window.__tivana_element_map = new WeakMap();
-            }
+            if (!window.__tivana_element_counter) window.__tivana_element_counter = 1;
+            if (!window.__tivana_element_map) window.__tivana_element_map = new WeakMap();
             const getStableId = (el) => {
                 let id = window.__tivana_element_map.get(el);
                 if (!id) { id = 'e' + (window.__tivana_element_counter++); window.__tivana_element_map.set(el, id); }
