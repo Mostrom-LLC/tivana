@@ -34,6 +34,7 @@ pub struct CdpResponse {
 }
 
 /// Manages extension WebSocket connections and their attached tabs
+#[derive(Clone)]
 pub struct ExtensionManager {
     /// Extension tabs: sessionId → ExtensionTab
     tabs: Arc<RwLock<HashMap<String, ExtensionTab>>>,
@@ -50,6 +51,9 @@ pub struct ExtensionManager {
 
     /// Tivana session ID → extension session ID mapping
     session_map: Arc<RwLock<HashMap<String, String>>>,
+
+    /// Agent client's outbound channel (for sending events to the agent)
+    agent_tx: Arc<Mutex<Option<mpsc::Sender<String>>>>,
 }
 
 impl ExtensionManager {
@@ -60,7 +64,19 @@ impl ExtensionManager {
             pending: Arc::new(Mutex::new(HashMap::new())),
             id_counter: Arc::new(Mutex::new(0)),
             session_map: Arc::new(RwLock::new(HashMap::new())),
+            agent_tx: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Set the agent's outbound channel for event streaming
+    pub async fn set_agent_tx(&self, tx: mpsc::Sender<String>) {
+        let mut agent = self.agent_tx.lock().await;
+        *agent = Some(tx);
+    }
+
+    /// Get a clone of the agent's outbound channel
+    pub async fn get_agent_tx(&self) -> Option<mpsc::Sender<String>> {
+        self.agent_tx.lock().await.clone()
     }
 
     /// Register an extension WebSocket connection

@@ -309,7 +309,8 @@ impl Server {
                         // Handle extension protocol messages
                         self.handle_extension_message(&text).await;
                     } else {
-                        // Normal SDK client message
+                        // Normal SDK client message — also register as agent for event streaming
+                        self.extension_manager.set_agent_tx(outbound_tx.clone()).await;
                         let response = self.handle_message(&text).await;
                         let response_json = serialize_outbound(&response)?;
                         if outbound_tx.send(response_json).await.is_err() {
@@ -509,6 +510,96 @@ impl Server {
                 if tx.send(msg).await.is_err() {
                     return; // Client disconnected
                 }
+            }
+        }
+    }
+
+    /// Push mutation and page events from an extension-backed session via JS polling
+    async fn push_extension_events(
+        ext_mgr: crate::extension::ExtensionManager,
+        session_id: String,
+        tx: mpsc::Sender<String>,
+    ) {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(200));
+        let mut consecutive_errors = 0u32;
+
+        loop {
+            interval.tick().await;
+
+            // Poll mutations
+            let mutation_poll = r#"(function() {
+                if (!window.__tivana_mutations) return JSON.stringify([]);
+                var m = window.__tivana_mutations.splice(0, 50);
+                return JSON.stringify(m);
+            })()"#;
+
+            match ext_mgr.evaluate(&session_id, mutation_poll).await {
+                Ok(result) => {
+                    consecutive_errors = 0;
+                    if let Some(val) = result.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()) {
+                        if let Ok(mutations) = serde_json::from_str::<Vec<serde_json::Value>>(val) {
+                            if !mutations.is_empty() {
+                                let parsed: Vec<crate::perceive::MutationEvent> = mutations.iter()
+                                    .filter_map(|m| crate::perceive::parse_mutation_event(m))
+                                    .collect();
+                                if !parsed.is_empty() {
+                                    let event = EventMessage::for_session(
+                                        &session_id,
+                                        "page.mutation",
+                                        serde_json::to_value(&parsed).unwrap_or_default(),
+                                    );
+                                    if let Ok(msg) = serialize_outbound(&OutboundMessage::Event(event)) {
+                                        if tx.send(msg).await.is_err() { return; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors > 10 {
+                        debug!(session_id = %session_id, "Extension event polling stopped — too many errors");
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            // Poll page events
+            let page_poll = r#"(function() {
+                if (!window.__tivana_page_events) return JSON.stringify([]);
+                var e = window.__tivana_page_events.splice(0, 50);
+                return JSON.stringify(e);
+            })()"#;
+
+            match ext_mgr.evaluate(&session_id, page_poll).await {
+                Ok(result) => {
+                    if let Some(val) = result.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()) {
+                        if let Ok(events) = serde_json::from_str::<Vec<serde_json::Value>>(val) {
+                            for evt in events {
+                                let event_type = evt.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                let event_name = match event_type {
+                                    "loaded" => "page.loaded",
+                                    "navigated" => "page.navigated",
+                                    "focus" => "page.focus",
+                                    "scroll" => "page.scroll",
+                                    "resize" => "page.resize",
+                                    _ => continue,
+                                };
+                                let event = EventMessage::for_session(
+                                    &session_id,
+                                    event_name,
+                                    evt.clone(),
+                                );
+                                if let Ok(msg) = serialize_outbound(&OutboundMessage::Event(event)) {
+                                    if tx.send(msg).await.is_err() { return; }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => {}
             }
         }
     }
@@ -1224,6 +1315,49 @@ impl Server {
             | "storage.getLocalStorage" | "storage.setLocalStorage" 
             | "storage.getSessionStorage" | "storage.setSessionStorage" | "storage.clear" => {
                 Ok(serde_json::json!({ "ok": true }))
+            }
+            "perceive.observe" => {
+                // Inject mutation observer
+                let mutation_script = crate::perceive::MUTATION_OBSERVER_INSTALL_SCRIPT;
+                let _ = self.extension_manager.evaluate(session_id, mutation_script).await;
+                
+                // Inject page event listeners
+                let page_event_script = crate::perceive::PAGE_EVENTS_INSTALL_SCRIPT;
+                let _ = self.extension_manager.evaluate(session_id, page_event_script).await;
+                
+                // Start background polling task for extension events
+                let ext_mgr = self.extension_manager.clone();
+                let sid = session_id.to_string();
+                tokio::spawn(async move {
+                    if let Some(tx) = ext_mgr.get_agent_tx().await {
+                        Self::push_extension_events(ext_mgr, sid, tx).await;
+                    }
+                });
+                
+                info!(session_id = %session_id, "Extension observation started (mutations + page events)");
+                Ok(serde_json::json!({
+                    "status": "started",
+                    "sessionId": session_id,
+                    "message": "Mutation and page events will be streamed"
+                }))
+            }
+            "perceive.unobserve" => {
+                // Clean up JS-side observers
+                let cleanup = r#"
+                    if (window.__tivana_mutation_observer) { window.__tivana_mutation_observer.disconnect(); }
+                    delete window.__tivana_mutations;
+                    delete window.__tivana_page_events;
+                    delete window.__tivana_observing;
+                    'cleaned'
+                "#;
+                let _ = self.extension_manager.evaluate(session_id, cleanup).await;
+                Ok(serde_json::json!({ "status": "stopped" }))
+            }
+            "perceive.mutations" => {
+                // One-shot mutation fetch (legacy compat)
+                let mutation_script = crate::perceive::MUTATION_OBSERVER_INSTALL_SCRIPT;
+                let _ = self.extension_manager.evaluate(session_id, mutation_script).await;
+                Ok(serde_json::json!({ "status": "started" }))
             }
             _ => {
                 Err(ProtocolError::new(
