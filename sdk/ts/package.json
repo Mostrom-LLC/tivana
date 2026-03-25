@@ -12,8 +12,12 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "bin": {
+    "tivana": "bin/tivana.mjs"
+  },
   "files": [
-    "dist"
+    "dist",
+    "bin"
   ],
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target node --format cjs && cp dist/index.js dist/index.cjs && bun build src/index.ts --outdir dist --target node --format esm && mv dist/index.js dist/index.mjs && mv dist/index.cjs dist/index.js && tsc --emitDeclarationOnly",

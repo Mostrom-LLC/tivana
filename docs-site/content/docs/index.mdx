@@ -1,0 +1,76 @@
+---
+title: Getting Started
+description: Get up and running with Tivana — the perception-first browser protocol for AI agents.
+---
+
+Tivana gives agents continuous, semantic awareness of web pages so they can perceive what is on screen, reason about it, and take action. The agent makes the decisions. Tivana provides the eyes and hands.
+
+## Quick Start
+
+### 1. Build the runtime
+
+```bash
+git clone https://github.com/Mostrom-LLC/tivana.git
+cd tivana/runtime
+cargo build --release
+```
+
+### 2. Start Tivana
+
+```bash
+./target/release/tivana
+```
+
+### 3. Install the SDK
+
+```bash
+npm install tivana
+```
+
+### 4. Perceive, Reason, Act
+
+```typescript
+import { TivanaClient } from "tivana";
+
+const client = new TivanaClient();
+await client.connect("ws://localhost:9876");
+await client.createSession();
+
+await client.navigate("https://example.com");
+
+const page = await client.pageState();
+const elements = await client.elements();
+
+// Your agent decides what to do
+const target = elements.find(
+  (el) => el.role === "link" && el.name?.includes("More information")
+);
+
+if (target) {
+  await client.click(target.id);
+}
+
+await client.closeSession();
+client.disconnect();
+```
+
+## What Tivana Is
+
+- A protocol and runtime for semantic browser perception
+- A thin action layer for clicking, typing, scrolling, and navigation by semantic target
+- A foundation for exploratory QA, accessibility review, visual reasoning, and human-observable agent browsing
+
+## What Tivana Is Not
+
+- A hardcoded site automation framework
+- A collection of brittle field matchers and workflow scripts
+- A stealth, CAPTCHA, or proxy product
+- A replacement for agent reasoning
+
+## Core Model
+
+```
+Perceive → Reason → Act → Observe → Repeat
+```
+
+The agent perceives the page through Tivana, reasons about what it sees (using an LLM or rules), acts through Tivana, and observes the result. Tivana never contains site-specific logic.

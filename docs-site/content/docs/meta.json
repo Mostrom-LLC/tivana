@@ -1,0 +1,19 @@
+{
+  "title": "Tivana",
+  "pages": [
+    "---Getting Started---",
+    "index",
+    "---Core Concepts---",
+    "architecture",
+    "observation-guide",
+    "---Protocol---",
+    "protocol-specification",
+    "protocol-reference",
+    "---SDK & Examples---",
+    "sdk-api-reference",
+    "examples",
+    "---More---",
+    "use-cases",
+    "contributing"
+  ]
+}
