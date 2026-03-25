@@ -1,0 +1,122 @@
+---
+title: Chrome Extension
+description: Install and use the Tivana Bridge Chrome extension for real browser tab perception.
+---
+
+
+Connect Tivana to your real browser tabs. The extension uses Chrome's `debugger` API (CDP 1.3) to give Tivana perception and action capabilities on any tab in your actual Chrome profile — with your cookies, sessions, and browsing context intact.
+
+## Why Use the Extension?
+
+| Feature | Managed Browser | Extension |
+|---|---|---|
+| Your real cookies/sessions | ❌ | ✅ |
+| Google account trust | ❌ | ✅ |
+| Authenticated pages | ❌ | ✅ |
+| Headless mode | ✅ | ❌ |
+| Zero setup | ✅ | Requires install |
+
+Use the extension when you need to work with pages that require your real browser identity — logged-in dashboards, authenticated apps, or any site where a fresh browser profile won't work.
+
+## Installation
+
+### Load as Unpacked Extension (Developer Mode)
+
+1. Open Chrome and navigate to `chrome://extensions`
+2. Enable **Developer mode** (toggle in the top-right corner)
+3. Click **Load unpacked**
+4. Select the `extension/` directory from the Tivana repository
+5. The Tivana Bridge icon appears in your toolbar
+
+### Verify Installation
+
+1. Start the Tivana runtime: `./target/release/tivana` (default port 9876)
+2. Click the Tivana Bridge icon in the toolbar — it shows connection status
+3. Right-click the icon → **Options** to see connection details and attached tabs
+
+## Usage
+
+### Attach a Tab
+
+1. Navigate to any page in Chrome
+2. Click the **Tivana Bridge** toolbar icon on that tab
+3. Chrome shows a "Tivana Bridge has started debugging this browser" banner — this is expected
+4. The icon badge shows **ON** when attached
+
+### Detach a Tab
+
+Click the toolbar icon again on an attached tab. Badge returns to off.
+
+### Connect from SDK
+
+```typescript
+import { TivanaClient } from "tivana";
+
+const client = new TivanaClient();
+await client.connect("ws://localhost:9876");
+
+// Create session from the attached extension tab
+const session = await client.fromExtension();
+
+// Now perceive and act on the real tab
+const elements = await client.elements();
+const page = await client.pageState();
+await client.click(someElement.id);
+```
+
+## Configuration
+
+Right-click the extension icon → **Options** to configure:
+
+- **Runtime Port**: WebSocket port for the Tivana runtime (default: `9876`)
+
+## How It Works
+
+```
+Chrome Tab ←→ chrome.debugger API ←→ Extension ←→ WebSocket ←→ Tivana Runtime ←→ SDK
+```
+
+1. Extension connects to the Tivana runtime via WebSocket
+2. When you attach a tab, the extension uses `chrome.debugger.attach` to enable CDP
+3. The runtime routes perception and action commands through the extension to the tab
+4. CDP domains (Runtime, Page, DOM, Input) are enabled on attach
+
+## Badge States
+
+| Badge | Meaning |
+|---|---|
+| (none) | No tab attached, not connected |
+| **ON** | Tab attached and debugger active |
+| **…** | Connecting to runtime |
+| **!** | Connection error |
+
+## Permissions
+
+The extension requests these Chrome permissions:
+
+- `debugger` — Core CDP access for perception and actions
+- `tabs` — Read tab URLs and titles for session management
+- `activeTab` — Access the currently focused tab
+- `storage` — Persist settings and tab state across restarts
+- `alarms` — Keep the service worker alive (Manifest V3 requirement)
+- `webNavigation` — Re-enable CDP domains after page navigation
+
+## Troubleshooting
+
+### "Tivana Bridge has started debugging" banner
+This is Chrome's standard debugger notification. It's expected and cannot be suppressed. The extension is working correctly.
+
+### Extension disconnects after idle
+Chrome's Manifest V3 service workers can be killed after extended idle. The extension uses `chrome.alarms` (25s keepalive) and auto-reconnects with exponential backoff (1s → 30s max).
+
+### Tab appears attached but commands fail
+Chrome may silently detach the debugger during long idle periods. The extension detects stale debuggers on reconnect and auto-reattaches. If issues persist, click the toolbar icon twice (detach then reattach).
+
+### Runtime not found
+Ensure the Tivana runtime is running: `./target/release/tivana` or `npx tivana`. Default port is 9876.
+
+## Chrome Web Store
+
+The extension is not currently published to the Chrome Web Store. Install it as an unpacked extension using Developer Mode (see Installation above).
+
+Publishing to the Chrome Web Store is planned for a future release.

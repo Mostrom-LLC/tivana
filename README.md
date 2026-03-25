@@ -104,6 +104,34 @@ cd ../sdk/ts
 bun install
 ```
 
+## Chrome Extension
+
+Tivana includes a Chrome extension for working with your real browser tabs — with your cookies, sessions, and Google account trust intact.
+
+### Install
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode** (top-right toggle)
+3. Click **Load unpacked** → select the `extension/` directory
+4. The Tivana Bridge icon appears in your toolbar
+
+### Use
+
+1. Start the runtime: `./target/release/tivana`
+2. Click the Tivana Bridge icon on any tab to attach it
+3. Connect from the SDK:
+
+```typescript
+const client = new TivanaClient();
+await client.connect("ws://localhost:9876");
+const session = await client.fromExtension();
+
+// Perceive and act on your real tab
+const elements = await client.elements();
+```
+
+See [extension/README.md](extension/README.md) for full documentation, troubleshooting, and badge states.
+
 ## Minimal Perceive -> Reason -> Act Example
 
 ```typescript
@@ -249,6 +277,7 @@ See [tasks/refocus-plan.md](tasks/refocus-plan.md) for the reset plan.
 - [docs/observation-guide.md](docs/observation-guide.md) — Snapshot vs event model
 - [docs/protocol-reference.md](docs/protocol-reference.md) — All methods and types
 - [docs/use-cases.md](docs/use-cases.md) — Target use cases
+- [extension/README.md](extension/README.md) — Chrome extension
 - [sdk/ts/README.md](sdk/ts/README.md) — TypeScript SDK
 - [examples/](examples/) — Working demos
 - [CONTRIBUTING.md](CONTRIBUTING.md) — How to contribute
