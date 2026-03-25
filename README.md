@@ -110,9 +110,15 @@ Tivana includes a Chrome extension for working with your real browser tabs — w
 
 ### Install
 
+```bash
+npx tivana extension
+```
+
+This copies the extension to `~/.tivana/extension/` and prints Chrome install instructions. Then:
+
 1. Open `chrome://extensions`
 2. Enable **Developer mode** (top-right toggle)
-3. Click **Load unpacked** → select the `extension/` directory
+3. Click **Load unpacked** → select `~/.tivana/extension/`
 4. The Tivana Bridge icon appears in your toolbar
 
 ### Use

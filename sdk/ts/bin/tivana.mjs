@@ -161,6 +161,75 @@ function findLocalBinary() {
   return null;
 }
 
+/**
+ * Handle `npx tivana extension` — copy extension to ~/.tivana/extension/
+ * and print install instructions.
+ */
+async function handleExtensionAsync(subArgs) {
+  const { fileURLToPath } = await import("node:url");
+  const { cpSync } = await import("node:fs");
+  const extDest = join(homedir(), ".tivana", "extension");
+
+  if (subArgs.includes("--path")) {
+    console.log(extDest);
+    process.exit(0);
+  }
+
+  if (subArgs.includes("--help")) {
+    console.log(`tivana extension — Install the Tivana Chrome extension\n`);
+    console.log(`Usage:`);
+    console.log(`  npx tivana extension           Copy extension to ~/.tivana/extension/ and print instructions`);
+    console.log(`  npx tivana extension --open     Copy and open the folder (macOS/Linux)`);
+    console.log(`  npx tivana extension --path     Print the extension directory path`);
+    console.log(`  npx tivana extension --help     Show this help`);
+    process.exit(0);
+  }
+
+  // Find the extension source — could be in the npm package or repo
+  const thisFile = fileURLToPath(import.meta.url);
+  const candidates = [
+    join(thisFile, "..", "..", "extension"),       // npm package: sdk/ts/bin/../extension/
+    join(thisFile, "..", "..", "..", "extension"),  // repo: sdk/ts/bin/../../../extension/
+    join(process.cwd(), "extension"),              // cwd
+  ];
+
+  let extSrc = null;
+  for (const c of candidates) {
+    if (existsSync(join(c, "manifest.json"))) {
+      extSrc = c;
+      break;
+    }
+  }
+
+  if (!extSrc) {
+    console.error("❌ Extension files not found in this package.");
+    console.error("   Clone the repo to get them: https://github.com/Mostrom-LLC/tivana");
+    process.exit(1);
+  }
+
+  // Copy to ~/.tivana/extension/
+  mkdirSync(extDest, { recursive: true });
+  cpSync(extSrc, extDest, { recursive: true, force: true });
+
+  console.log(`✅ Extension installed to: ${extDest}\n`);
+  console.log(`To load in Chrome:`);
+  console.log(`  1. Open chrome://extensions`);
+  console.log(`  2. Enable "Developer mode" (top-right toggle)`);
+  console.log(`  3. Click "Load unpacked"`);
+  console.log(`  4. Select: ${extDest}`);
+  console.log(`  5. Click the Tivana Bridge icon on any tab to attach\n`);
+
+  if (subArgs.includes("--open")) {
+    if (platform() === "darwin") {
+      spawn("open", [extDest], { stdio: "inherit" });
+    } else if (platform() === "linux") {
+      spawn("xdg-open", [extDest], { stdio: "inherit" });
+    }
+  }
+
+  process.exit(0);
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -170,11 +239,20 @@ async function main() {
     process.exit(0);
   }
 
+  // Subcommand: extension
+  if (args[0] === "extension") {
+    await handleExtensionAsync(args.slice(1));
+    return;
+  }
+
   // --cli-help (help about the CLI wrapper itself, not the runtime)
   if (args.includes("--cli-help")) {
     console.log(`Tivana CLI v${VERSION}`);
     console.log(`\nWraps the Tivana runtime binary. Downloads it on first use.\n`);
-    console.log(`Binary cache: ${CACHE_DIR}`);
+    console.log(`Commands:`);
+    console.log(`  npx tivana                     Start the runtime`);
+    console.log(`  npx tivana extension            Install Chrome extension`);
+    console.log(`\nBinary cache: ${CACHE_DIR}`);
     console.log(`\nTo clear the cache: rm -rf ~/.tivana/bin`);
     console.log(`To build from source: cd runtime && cargo build --release`);
     process.exit(0);

@@ -20,13 +20,32 @@ Use the extension when you need to work with pages that require your real browse
 
 ## Installation
 
-### Load as Unpacked Extension (Developer Mode)
+### From npm (recommended)
+
+```bash
+npx tivana extension
+```
+
+This copies the extension to `~/.tivana/extension/` and prints instructions. Then:
 
 1. Open Chrome and navigate to `chrome://extensions`
 2. Enable **Developer mode** (toggle in the top-right corner)
 3. Click **Load unpacked**
-4. Select the `extension/` directory from the Tivana repository
+4. Select `~/.tivana/extension/`
 5. The Tivana Bridge icon appears in your toolbar
+
+Additional options:
+
+```bash
+npx tivana extension --open    # Copy and open the folder
+npx tivana extension --path    # Print the extension path
+```
+
+### From source (contributors)
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode**
+3. Click **Load unpacked** → select the `extension/` directory from the cloned repo
 
 ### Verify Installation
 

@@ -17,7 +17,8 @@
   },
   "files": [
     "dist",
-    "bin"
+    "bin",
+    "extension"
   ],
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target node --format cjs && cp dist/index.js dist/index.cjs && bun build src/index.ts --outdir dist --target node --format esm && mv dist/index.js dist/index.mjs && mv dist/index.cjs dist/index.js && tsc --emitDeclarationOnly",
@@ -26,6 +27,7 @@
     "typecheck": "tsc --noEmit",
     "smoke-test": "bun run smoke-test.ts",
     "example": "bun run examples/smoke-test.ts",
+    "prepack": "rm -rf extension && cp -r ../../extension extension",
     "prepublishOnly": "npm run build && npm run typecheck"
   },
   "keywords": [
