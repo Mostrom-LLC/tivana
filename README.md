@@ -4,7 +4,7 @@ Perception-first browser protocol for AI agents.
 
 Tivana gives agents continuous, semantic awareness of web pages so they can perceive what is on screen, reason about it, and take action. The agent makes the decisions. Tivana provides the eyes and hands.
 
-[![npm version](https://img.shields.io/npm/v/tivana)](https://www.npmjs.com/package/tivana)
+[![npm version](https://img.shields.io/npm/v/@mostrom/tivana)](https://www.npmjs.com/package/@mostrom/tivana)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Status: `0.1.0` — functional, documented, seeking early adopters.

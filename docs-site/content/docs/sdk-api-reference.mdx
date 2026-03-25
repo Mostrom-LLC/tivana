@@ -11,13 +11,13 @@ Tivana gives agents semantic awareness of web pages: perceive what's on screen, 
 ## Installation
 
 ```bash
-npm install tivana
+npm install @mostrom/tivana
 ```
 
 ## Quick Start
 
 ```typescript
-import { TivanaClient } from "tivana";
+import { TivanaClient } from "@mostrom/tivana";
 
 const client = new TivanaClient({ url: "ws://localhost:9876" });
 await client.connect();
@@ -43,7 +43,7 @@ client.disconnect();
 The canonical Tivana integration: perceive → reason → act → repeat.
 
 ```typescript
-import { TivanaClient } from "tivana";
+import { TivanaClient } from "@mostrom/tivana";
 
 const client = new TivanaClient({ url: "ws://localhost:9876" });
 await client.connect();

@@ -12,7 +12,7 @@
  * Usage: bun run examples/04-anomaly-detection.ts [url]
  */
 
-import { TivanaClient, type Element, type PageState } from "tivana";
+import { TivanaClient, type Element, type PageState } from "@mostrom/tivana";
 
 const url = process.argv[2] || "https://news.ycombinator.com";
 

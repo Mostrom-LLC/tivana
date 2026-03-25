@@ -14,7 +14,7 @@
  * Usage: bun run examples/06-event-streaming.ts [seconds]
  */
 
-import { TivanaClient, type PageEvent } from "tivana";
+import { TivanaClient, type PageEvent } from "@mostrom/tivana";
 
 const duration = parseInt(process.argv[2] || "30") * 1000;
 

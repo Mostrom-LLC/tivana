@@ -24,13 +24,13 @@ cargo build --release
 ### 3. Install the SDK
 
 ```bash
-npm install tivana
+npm install @mostrom/tivana
 ```
 
 ### 4. Perceive, Reason, Act
 
 ```typescript
-import { TivanaClient } from "tivana";
+import { TivanaClient } from "@mostrom/tivana";
 
 const client = new TivanaClient();
 await client.connect("ws://localhost:9876");

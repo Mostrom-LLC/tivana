@@ -1,5 +1,5 @@
 {
-  "name": "tivana",
+  "name": "@mostrom/tivana",
   "version": "0.1.0",
   "description": "TypeScript SDK for Tivana - Streaming browser perception protocol for AI agents",
   "main": "dist/index.js",

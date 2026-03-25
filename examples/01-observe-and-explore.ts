@@ -10,7 +10,7 @@
  * Usage: bun run examples/01-observe-and-explore.ts [url]
  */
 
-import { TivanaClient } from "tivana";
+import { TivanaClient } from "@mostrom/tivana";
 
 const url = process.argv[2] || "https://news.ycombinator.com";
 
