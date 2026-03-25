@@ -452,7 +452,15 @@ export class TivanaClient {
     title: string;
     connected: boolean;
   }> {
-    const result = await this.request("session.fromExtension", {
+    const result = await this.request<{
+      sessionId: string;
+      extensionSessionId: string;
+      tabId: number;
+      targetId: string;
+      url: string;
+      title: string;
+      connected: boolean;
+    }>("session.fromExtension", {
       ...(extensionSessionId ? { extensionSessionId } : {}),
     });
     if (result.sessionId) {
