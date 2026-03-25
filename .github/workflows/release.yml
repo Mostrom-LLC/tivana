@@ -1,9 +1,9 @@
 name: Release
 
-#on:
-#  push:
-#    tags:
-#      - "v*"
+on:
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
@@ -89,9 +89,14 @@ jobs:
           npm install
           npm run build
 
+      - name: Bundle extension
+        working-directory: sdk/ts
+        run: cp -r ../../extension extension
+
       - name: Publish to npm
         working-directory: sdk/ts
         run: npm publish --access public
+        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
