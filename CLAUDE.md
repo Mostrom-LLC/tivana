@@ -4,10 +4,10 @@ Tivana is a browser perception protocol for AI agents.
 
 ## Skills
 
-The `skill/` directory contains a SKILL.md that teaches agents how to use Tivana's SDK.
+The `skills/tivana/` directory contains a SKILL.md that teaches agents how to use Tivana's SDK.
 
 ```
-skill/SKILL.md — Full API reference, agent loop patterns, examples
+skills/tivana/SKILL.md — Full API reference, agent loop patterns, examples
 ```
 
 ## Project Structure
@@ -41,4 +41,4 @@ cd sdk/ts && bun install && bun run build
 - `docs/architecture.md` — System architecture
 - `docs/observation-guide.md` — Snapshot vs event model
 - `sdk/ts/README.md` — SDK API reference
-- `skill/SKILL.md` — Agent skill definition
+- `skills/tivana/SKILL.md` — Agent skill definition

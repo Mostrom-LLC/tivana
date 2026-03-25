@@ -4,7 +4,7 @@ Tivana is a browser perception protocol for AI agents.
 
 ## Skills
 
-Read `skill/SKILL.md` for the full Tivana API, agent loop patterns, and examples.
+Read `skills/tivana/SKILL.md` for the full Tivana API, agent loop patterns, and examples.
 
 ## Project Structure
 

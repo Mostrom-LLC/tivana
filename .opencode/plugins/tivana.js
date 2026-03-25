@@ -31,7 +31,7 @@ const extractAndStripFrontmatter = (content) => {
 };
 
 export const TivanaPlugin = async ({ client, directory }) => {
-  const tivanaSkillsDir = path.resolve(__dirname, '../../skill');
+  const tivanaSkillsDir = path.resolve(__dirname, '../../skills/tivana');
 
   return {
     config: async (config) => {

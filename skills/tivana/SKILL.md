@@ -1,279 +1,163 @@
-# Tivana Skill
+---
+name: tivana
+description: "Browser perception protocol for AI agents via Tivana runtime + TypeScript SDK. Use when: (1) perceiving web page structure, elements, and state semantically, (2) building agent loops that perceive → reason → act on web pages, (3) clicking, typing, scrolling, or navigating by semantic element ID, (4) monitoring page mutations and events in real-time, (5) running accessibility reviews or anomaly detection on live pages, (6) extracting design tokens or page metadata, (7) filling forms through perception rather than hardcoded selectors. NOT for: site-specific automation scripts with hardcoded selectors, CAPTCHA solving as primary goal, or tasks that don't involve browser interaction. Requires: Tivana runtime (Rust binary) running on localhost, or Chrome extension for extension-backed sessions."
+---
 
-Streaming browser perception protocol for AI agents.
+# Tivana — Browser Perception for Agents
 
-## When to Use
+Tivana provides semantic browser awareness. Perceive the page, reason about it, act on it.
 
-Use Tivana when you need to:
-- Navigate and interact with web pages programmatically
-- Perceive page state including elements, text, and visual styles
-- Automate browser tasks (form filling, clicking, navigation)
-- Test web applications
-- Scrape structured data from websites
+## Architecture
 
-Tivana is **not** for:
-- Simple HTTP requests (use `fetch` or `curl`)
-- Static HTML parsing (use `cheerio` or similar)
-- When you already have the data you need
-
-## Prerequisites
-
-### 1. Start the Tivana Runtime
-
-The runtime must be running before you can use the SDK.
-
-```bash
-# If not built yet
-cd tivana/runtime
-cargo build --release
-
-# Start the runtime (headed mode - browser visible)
-./target/release/tivana
-
-# Or headless mode (no browser window)
-./target/release/tivana --headless
+```
+Agent (you) ←→ Tivana SDK (TypeScript) ←→ Tivana Runtime (Rust, WebSocket)
+                                              ↕
+                                         Browser (CDP)
+                                              or
+                                         Chrome Extension
 ```
 
-The runtime listens on `ws://localhost:9876` by default.
-
-### 2. Install the SDK
-
-```bash
-# Using local SDK (pre-npm publish)
-cd tivana/sdk/ts
-bun install
-```
-
-Then import directly from the local path or use a symlink.
-
-## Core Methods
-
-### Connection
+## Quick Start
 
 ```typescript
-import { TivanaClient } from "tivana";
+import { TivanaClient } from "@mostrom/tivana";
 
-const client = new TivanaClient();
-await client.connect();  // Connects to ws://localhost:9876
-
-// Custom URL
-await client.connect("ws://localhost:8080");
-
-// Disconnect when done
-client.disconnect();
-```
-
-### Session Management
-
-```typescript
-// Create a browser session (launches Chromium)
-await client.createSession();
-
-// With options
-await client.createSession({ headless: true });
-
-// Close session
-await client.closeSession();
-
-// List all sessions
-const sessions = await client.listSessions();
-```
-
-### Navigation
-
-```typescript
-// Navigate to URL
-await client.navigate("https://example.com");
-
-// Returns when page is loaded
-```
-
-### Perception
-
-```typescript
-// Get page state (URL, title, scroll position, viewport)
-const state = await client.pageState();
-// { url, title, scrollX, scrollY, viewportWidth, viewportHeight, timestampMs }
-
-// Get interactive elements with visual data
-const elements = await client.elements();
-// [{ id, role, name, bounds, styles, focused, enabled, ... }]
-
-// Get page text content
-const text = await client.textContent();
-
-// Get metadata (title, description, og:image)
-const meta = await client.metadata();
-```
-
-### Actions
-
-```typescript
-// Click by element ID (from elements() response)
-await client.click("e5");
-
-// Click by role and label
-await client.click({ role: "button", label: "Submit" });
-
-// Type into element
-await client.type("hello world", "e3");
-
-// Type into focused element
-await client.type("hello");
-
-// Press key
-await client.press("Enter");
-
-// Key combination
-await client.press("Control+A");
-
-// Scroll element into view
-await client.scroll("e10");
-
-// Scroll page
-await client.scroll(null, "down");
-
-// Hover
-await client.hover("e5");
-
-// Select dropdown option
-await client.select("e7", "option-value");
-
-// Wait for condition
-await client.waitFor({ type: "Navigation" });
-await client.waitFor({ type: "Element", selector: "#result" });
-```
-
-## Example Flows
-
-### Navigate and Read Page
-
-```typescript
-const client = new TivanaClient();
+const client = new TivanaClient({ url: "ws://localhost:9876" });
 await client.connect();
 await client.createSession();
 
-await client.navigate("https://news.ycombinator.com");
-const state = await client.pageState();
-console.log(`Page: ${state.title}`);
-
+// Perceive
+const page = await client.pageState();
 const elements = await client.elements();
-const links = elements.filter(e => e.role === "link");
-console.log(`Found ${links.length} links`);
+
+// Reason (your logic / LLM call)
+const target = elements.find(e => e.role === "button" && e.name?.includes("Submit"));
+
+// Act
+if (target) await client.click(target.id);
 
 await client.closeSession();
 client.disconnect();
 ```
 
-### Fill and Submit Form
+## Core API
+
+### Session
+
+| Method | Description |
+|--------|-------------|
+| `connect(url?)` | Connect to runtime (default `ws://localhost:9876`) |
+| `createSession(opts?)` | Create managed browser session (`{ headless?: boolean }`) |
+| `closeSession()` | Close session and browser |
+| `request(method, params)` | Send raw protocol request |
+
+### Perceive
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `pageState()` | `PageState` | URL, title, viewport, scroll position, document size |
+| `elements()` | `Element[]` | All interactive elements with id, role, name, bounds, visible, interactable |
+| `accessibilitySnapshot()` | `AccessibilitySnapshot` | Accessibility tree |
+| `textContent()` | `string` | Full page text |
+| `evaluate(js)` | `any` | Execute JS in page context |
+
+### Act
+
+| Method | Description |
+|--------|-------------|
+| `click(elementId)` | Click element by semantic ID |
+| `type(text, elementId?)` | Type text into element or focused element |
+| `press(key, modifiers?)` | Press key (Enter, Tab, Escape, etc.) |
+| `scroll(elementId?, direction?)` | Scroll element or page |
+| `navigate(url)` | Navigate to URL |
+| `hover(elementId)` | Hover over element |
+| `focus(elementId)` | Focus element |
+| `select(elementId, values)` | Select dropdown option |
+
+### Observe
+
+| Method | Description |
+|--------|-------------|
+| `startObservation()` | Begin streaming page events and mutations |
+| `stopObservation()` | Stop streaming |
+| `onEvent(callback)` | Subscribe to all events |
+| `onPageEvent(type, callback)` | Subscribe to specific event type |
+
+Event types: `page.mutation`, `page.loaded`, `page.navigated`, `page.focus`, `page.scroll`, `page.resize`
+
+## Element Properties
+
+Each element from `elements()` includes:
+
+- `id` — stable semantic ID (e.g., `e1`, `e42`)
+- `role` — semantic role (`button`, `a`, `text`, `select`, `checkbox`, etc.)
+- `name` — accessible label
+- `value` — current value
+- `visible` — computed visibility (display, opacity, dimensions)
+- `interactable` — visible + enabled + hit-test passes
+- `enabled` — not disabled
+- `focused` — has focus
+- `required` — required field
+- `checked` — checkbox/radio state
+- `bounds` — `{ x, y, width, height }` viewport coordinates
+
+## Extension-Backed Sessions
+
+For real browser tabs (with cookies, auth, extensions):
 
 ```typescript
-await client.navigate("https://example.com/login");
-
-// Get form elements
-const elements = await client.elements();
-
-// Find username field
-const usernameField = elements.find(e => 
-  e.role === "textbox" && e.name?.toLowerCase().includes("username")
-);
-
-// Find password field
-const passwordField = elements.find(e =>
-  e.role === "textbox" && e.name?.toLowerCase().includes("password")
-);
-
-// Find submit button
-const submitButton = elements.find(e =>
-  e.role === "button" && e.name?.toLowerCase().includes("sign in")
-);
-
-// Fill form
-if (usernameField) await client.type("myuser", usernameField.id);
-if (passwordField) await client.type("mypass", passwordField.id);
-if (submitButton) await client.click(submitButton.id);
-
-// Wait for navigation
-await client.waitFor({ type: "Navigation" });
+const ext = await client.request("session.fromExtension", {});
+// Now all perceive/act commands target the real browser tab
 ```
 
-### Extract Data from Table
+Requires the Tivana Chrome extension installed and a tab attached.
+
+## Canonical Agent Loop Pattern
 
 ```typescript
-await client.navigate("https://example.com/data");
+for (let step = 0; step < maxSteps; step++) {
+  const [page, elements] = await Promise.all([
+    client.pageState(),
+    client.elements(),
+  ]);
 
-const elements = await client.elements();
+  // Send perception to LLM for decision
+  const decision = await yourModel.decide({ goal, page, elements });
 
-// Find table cells
-const cells = elements.filter(e => e.role === "cell" || e.role === "gridcell");
-
-// Extract text from cells
-const data = cells.map(cell => ({
-  id: cell.id,
-  text: cell.name || cell.value || "",
-  bounds: cell.bounds
-}));
-
-console.log(JSON.stringify(data, null, 2));
-```
-
-### Handle Dynamic Content
-
-```typescript
-await client.navigate("https://example.com/spa");
-
-// Click a button that loads content
-const loadButton = (await client.elements()).find(e => 
-  e.name?.includes("Load More")
-);
-if (loadButton) {
-  await client.click(loadButton.id);
-  
-  // Wait for new content
-  await client.waitFor({ type: "Element", selector: ".new-content" });
-  
-  // Get updated elements
-  const newElements = await client.elements();
-  console.log(`Now have ${newElements.length} elements`);
+  if (decision.type === "done") break;
+  if (decision.type === "click") await client.click(decision.target);
+  if (decision.type === "type") await client.type(decision.text, decision.target);
+  if (decision.type === "navigate") await client.navigate(decision.url);
 }
 ```
 
-## Error Handling
+## Starting the Runtime
 
-```typescript
-try {
-  await client.click("e999");
-} catch (error) {
-  // Error codes:
-  // - target_not_found: Element doesn't exist
-  // - target_ambiguous: Multiple matches
-  // - action_failed: Click couldn't complete
-  // - session_not_found: No active session
-  // - browser_crashed: Browser died
-  console.error(`Action failed: ${error.message}`);
-}
+```bash
+# Default (headed, port 9876)
+./tivana
+
+# Headless
+./tivana --headless
+
+# Custom port
+./tivana --port 3000
+
+# Connect to existing Chrome
+./tivana --connect 9222
 ```
 
-### Common Errors
+## Examples
 
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `target_not_found` | Element ID doesn't exist | Call `elements()` to get fresh IDs after navigation |
-| `session_not_found` | No browser session | Call `createSession()` first |
-| `connection_refused` | Runtime not running | Start runtime with `tivana` |
-| `timeout` | Action took too long | Increase timeout or check page state |
+See `examples/` in the repo for working demos:
+- `01-observe-and-explore.ts` — page structure discovery
+- `02-agent-loop.ts` — perceive → reason → act
+- `03-accessibility-review.ts` — a11y audit via perception
+- `04-anomaly-detection.ts` — visual/structural QA
+- `05-form-awareness.ts` — form understanding without selectors
+- `06-event-streaming.ts` — real-time observation
+- `07-design-token-extraction.ts` — W3C DTCG token extraction
 
-## Tips
+## Key Principle
 
-1. **Always refresh element IDs after navigation** - IDs reset when the page changes
-2. **Use headless mode for automation** - Faster and uses less resources
-3. **Check element enabled state** - Don't click disabled buttons
-4. **Use role+label selectors for stability** - More resilient than IDs across page changes
-5. **Handle errors gracefully** - Web pages are unpredictable
-
-## Reference
-
-- [Full API Documentation](../sdk/ts/README.md)
-- [Protocol Specification](../docs/protocol-specification.md)
-- [Element Model](../docs/element-model.md)
-- [Action Primitives](../docs/action-primitives.md)
+Tivana provides perception and action primitives. Site-specific logic, field matching, label heuristics, and decision-making belong in the agent, not in Tivana calls. Always perceive first, then reason, then act.

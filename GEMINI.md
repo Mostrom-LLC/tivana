@@ -1,1 +1,1 @@
-@./skill/SKILL.md
+@./skills/tivana/SKILL.md
