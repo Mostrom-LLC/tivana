@@ -7,13 +7,13 @@ Tivana gives agents semantic awareness of web pages: perceive what's on screen, 
 ## Installation
 
 ```bash
-npm install tivana
+npm install @mostrom/tivana
 ```
 
 ## Quick Start
 
 ```typescript
-import { TivanaClient } from "tivana";
+import { TivanaClient } from "@mostrom/tivana";
 
 const client = new TivanaClient({ url: "ws://localhost:9876" });
 await client.connect();
@@ -39,7 +39,7 @@ client.disconnect();
 The canonical Tivana integration: perceive → reason → act → repeat.
 
 ```typescript
-import { TivanaClient } from "tivana";
+import { TivanaClient } from "@mostrom/tivana";
 
 const client = new TivanaClient({ url: "ws://localhost:9876" });
 await client.connect();
@@ -240,16 +240,18 @@ Error codes: `element_not_found`, `session_not_found`, `browser_disconnected`, `
 
 ## Runtime
 
-The SDK requires the Tivana runtime. See the [project README](../../README.md) for build and run instructions.
+The SDK requires the Tivana runtime. Start it with:
 
 ```bash
-# Build
-cd runtime && cargo build --release
+npx @mostrom/tivana
+```
 
-# Run
-./target/release/tivana --port 9876
-./target/release/tivana --headless
-./target/release/tivana --connect 9222
+The CLI auto-downloads the prebuilt binary for your platform on first run. Options:
+
+```bash
+npx @mostrom/tivana --headless       # Headless mode
+npx @mostrom/tivana --port 3000      # Custom port
+npx @mostrom/tivana --connect 9222   # Attach to existing Chrome
 ```
 
 ## Examples
