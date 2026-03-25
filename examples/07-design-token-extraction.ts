@@ -13,7 +13,7 @@
  * Usage: bun run examples/07-design-token-extraction.ts [url]
  */
 
-import { TivanaClient } from "../sdk/ts/src/client";
+import { TivanaClient } from "tivana";
 
 const url = process.argv[2] || "https://stripe.com";
 

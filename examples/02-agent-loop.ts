@@ -13,7 +13,7 @@
  * Usage: bun run examples/02-agent-loop.ts
  */
 
-import { TivanaClient, type Element, type PageState } from "../sdk/ts/src/client";
+import { TivanaClient, type Element, type PageState } from "tivana";
 
 // --- Agent decision types ---
 type Decision =

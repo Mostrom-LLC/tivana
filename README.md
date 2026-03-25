@@ -4,7 +4,10 @@ Perception-first browser protocol for AI agents.
 
 Tivana gives agents continuous, semantic awareness of web pages so they can perceive what is on screen, reason about it, and take action. The agent makes the decisions. Tivana provides the eyes and hands.
 
-Status: pre-release.
+[![npm version](https://img.shields.io/npm/v/tivana)](https://www.npmjs.com/package/tivana)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+Status: `0.1.0` — functional, documented, seeking early adopters.
 
 ## What Tivana Is
 
@@ -208,6 +211,26 @@ for (let step = 0; step < 20; step++) {
 - visual anomaly detection
 - flow validation where the agent must adapt instead of following a rigid script
 
+## Examples
+
+See [examples/](examples/) for 7 working demos:
+
+| Example | What it shows |
+|---------|---------------|
+| [01-observe-and-explore](examples/01-observe-and-explore.ts) | Connect, perceive, and explore any page |
+| [02-agent-loop](examples/02-agent-loop.ts) | Perceive → reason → act → repeat |
+| [03-accessibility-review](examples/03-accessibility-review.ts) | Review a page for a11y issues |
+| [04-anomaly-detection](examples/04-anomaly-detection.ts) | Detect visual/structural anomalies |
+| [05-form-awareness](examples/05-form-awareness.ts) | Understand forms without selectors |
+| [06-event-streaming](examples/06-event-streaming.ts) | Real-time page event monitoring |
+| [07-design-token-extraction](examples/07-design-token-extraction.ts) | Extract W3C DTCG design tokens |
+
+Every example works on any URL. No hardcoded selectors, no site-specific logic.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for fork/PR instructions and commit conventions.
+
 ## Current Project Direction
 
 The runtime and SDK already have solid Perceive + Act primitives. The next focus is making the agent loop first-class:
@@ -216,15 +239,20 @@ The runtime and SDK already have solid Perceive + Act primitives. The next focus
 - mutation/event streaming should be explicit and ergonomic in the SDK
 - examples and demos should show agent judgment, not hardcoded site scripts
 
-See [tasks/refocus-plan.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/tasks/refocus-plan.md) for the reset plan.
+See [tasks/refocus-plan.md](tasks/refocus-plan.md) for the reset plan.
 
 ## Repository Map
 
-- [docs/what-it-is.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/docs/what-it-is.md)
-- [docs/protocol-specification.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/docs/protocol-specification.md)
-- [docs/architecture.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/docs/architecture.md)
-- [docs/use-cases.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/docs/use-cases.md)
-- [sdk/ts/README.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/sdk/ts/README.md)
+- [docs/what-it-is.md](docs/what-it-is.md) — What Tivana is and isn't
+- [docs/protocol-specification.md](docs/protocol-specification.md) — Full protocol spec
+- [docs/architecture.md](docs/architecture.md) — System architecture
+- [docs/observation-guide.md](docs/observation-guide.md) — Snapshot vs event model
+- [docs/protocol-reference.md](docs/protocol-reference.md) — All methods and types
+- [docs/use-cases.md](docs/use-cases.md) — Target use cases
+- [sdk/ts/README.md](sdk/ts/README.md) — TypeScript SDK
+- [examples/](examples/) — Working demos
+- [CONTRIBUTING.md](CONTRIBUTING.md) — How to contribute
+- [CHANGELOG.md](CHANGELOG.md) — Version history
 
 ## Running Tests
 

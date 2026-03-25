@@ -12,7 +12,7 @@
  * Usage: bun run examples/03-accessibility-review.ts [url]
  */
 
-import { TivanaClient, type Element } from "../sdk/ts/src/client";
+import { TivanaClient, type Element } from "tivana";
 
 const url = process.argv[2] || "https://news.ycombinator.com";
 

@@ -2,14 +2,7 @@
 
 TypeScript client for Tivana's browser perception protocol.
 
-Use this SDK when you want an agent runner to:
-
-1. inspect the current page semantically
-2. decide what to do next
-3. act through Tivana
-4. repeat
-
-The SDK is not meant to be a place for site-specific automation logic. Tivana provides perception and action primitives; your agent provides the reasoning.
+Tivana gives agents semantic awareness of web pages: perceive what's on screen, reason about it, act on it. The SDK connects to the Tivana runtime over WebSocket.
 
 ## Installation
 
@@ -17,16 +10,7 @@ The SDK is not meant to be a place for site-specific automation logic. Tivana pr
 npm install tivana
 ```
 
-For local development:
-
-```bash
-cd sdk/ts
-bun install
-```
-
-## Recommended Usage
-
-Use `TivanaClient` directly for explicit agent loops.
+## Quick Start
 
 ```typescript
 import { TivanaClient } from "tivana";
@@ -35,187 +19,126 @@ const client = new TivanaClient({ url: "ws://localhost:9876" });
 await client.connect();
 await client.createSession();
 
+// Perceive
 await client.navigate("https://example.com");
-
 const page = await client.pageState();
 const elements = await client.elements();
 
-console.log(page.title);
-console.log(elements.length);
+// Reason
+const link = elements.find(e => e.role === "a" && e.name?.includes("More"));
+
+// Act
+if (link) await client.click(link.id);
+
+await client.closeSession();
+client.disconnect();
 ```
 
-## Example Agent Loop
+## Agent Loop Pattern
+
+The canonical Tivana integration: perceive → reason → act → repeat.
 
 ```typescript
 import { TivanaClient } from "tivana";
 
-type AgentDecision =
-  | { type: "click"; target: string }
-  | { type: "type"; target: string; text: string }
-  | { type: "press"; key: string; modifiers?: string[] }
-  | { type: "navigate"; url: string }
-  | { type: "done"; summary: string };
-
-async function decideWithModel(input: {
-  goal: string;
-  profile: Record<string, unknown>;
-  page: unknown;
-  elements: unknown;
-}): Promise<AgentDecision> {
-  // Call your model here with Tivana perception.
-  throw new Error("Implement model call");
-}
-
-const client = new TivanaClient();
-await client.connect("ws://localhost:9876");
+const client = new TivanaClient({ url: "ws://localhost:9876" });
+await client.connect();
 await client.createSession();
+await client.navigate("https://example.com");
 
-const goal = "Complete the current flow using the provided profile.";
-const profile = {
-  sponsorshipRequired: false,
-  authorizedToWork: true,
-};
-
-for (let step = 0; step < 30; step++) {
+for (let step = 0; step < 20; step++) {
   const [page, elements] = await Promise.all([
     client.pageState(),
     client.elements(),
   ]);
 
-  const decision = await decideWithModel({ goal, profile, page, elements });
+  // Send perception to your model
+  const decision = await yourModel.decide({ goal, page, elements });
 
-  if (decision.type === "done") {
-    console.log(decision.summary);
-    break;
-  }
-
-  if (decision.type === "navigate") {
-    await client.navigate(decision.url);
-    continue;
-  }
-
-  if (decision.type === "click") {
-    await client.click(decision.target);
-    continue;
-  }
-
-  if (decision.type === "type") {
-    await client.type(decision.text, decision.target);
-    continue;
-  }
-
-  if (decision.type === "press") {
-    await client.press(decision.key, decision.modifiers);
-  }
+  if (decision.type === "done") break;
+  if (decision.type === "click") await client.click(decision.target);
+  if (decision.type === "type") await client.type(decision.text, decision.target);
+  if (decision.type === "navigate") await client.navigate(decision.url);
 }
 ```
 
-## Core API
+## API Reference
 
-### Session
+### Constructor
 
-- `connect(url?)`
-- `createSession(params?)`
-- `closeSession()`
-- `listSessions()`
-- `disconnect()`
+```typescript
+new TivanaClient(options?: { url?: string; timeout?: number })
+```
+
+- `url` — WebSocket URL (default: `ws://localhost:9876`)
+- `timeout` — Default request timeout in ms (default: `30000`)
+
+### Connection
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `connect(url?)` | `Promise<void>` | Connect to Tivana runtime |
+| `disconnect()` | `void` | Close WebSocket connection |
+| `createSession(opts?)` | `Promise<{ sessionId: string }>` | Create browser session. Options: `{ headless?: boolean }` |
+| `closeSession()` | `Promise<void>` | Close current session and browser |
+| `request(method, params)` | `Promise<T>` | Send raw protocol request |
 
 ### Perception
 
-- `pageState()`
-- `elements()`
-- `accessibilitySnapshot()`
-- `textContent()`
-- `metadata()`
-- `findElements(selector)`
-- `formFields()`
-
-These methods are the heart of Tivana. Most agent integrations should start here.
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `pageState()` | `Promise<PageState>` | Page URL, title, viewport, scroll position, document size |
+| `elements()` | `Promise<Element[]>` | All interactive elements with semantic IDs, roles, labels, bounds, visibility |
+| `accessibilitySnapshot()` | `Promise<AccessibilitySnapshot>` | Accessibility tree snapshot |
+| `textContent()` | `Promise<string>` | Full visible text content |
+| `metadata()` | `Promise<PageMetadata>` | Page metadata (title, description, og tags) |
+| `formFields()` | `Promise<FormField[]>` | Form field enumeration with computed labels, options, validation |
+| `evaluate(expression)` | `Promise<any>` | Execute JavaScript in page context |
 
 ### Actions
 
-- `navigate(url)`
-- `click(target, options?)`
-- `type(text, target?, options?)`
-- `press(key, modifiers?)`
-- `scroll(target?, direction?, options?)`
-- `hover(target)`
-- `focus(target)`
-- `select(target, value)`
-- `waitFor(condition, timeoutMs?)`
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `navigate(url)` | `Promise<ActionResult>` | Navigate to URL |
+| `click(target)` | `Promise<ActionResult>` | Click element by ID (e.g. `"e5"`) |
+| `type(text, target?)` | `Promise<ActionResult>` | Type text into element or focused element |
+| `press(key, modifiers?)` | `Promise<ActionResult>` | Press key. Keys: `Enter`, `Tab`, `Escape`, `Backspace`, `ArrowDown`, etc. Modifiers: `["Shift"]`, `["Control"]`, `["Meta"]` |
+| `scroll(target?, direction?)` | `Promise<ActionResult>` | Scroll element or page. Direction: `"up"`, `"down"`, `"left"`, `"right"` |
+| `hover(target)` | `Promise<ActionResult>` | Hover over element |
+| `focus(target)` | `Promise<ActionResult>` | Focus element |
+| `select(target, values)` | `Promise<ActionResult>` | Select dropdown option(s) |
 
-These actions should be driven by current perception, not by brittle hardcoded assumptions.
+### Observation
 
-## Secondary API
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `startObservation()` | `Promise<void>` | Begin streaming page events and DOM mutations |
+| `stopObservation()` | `Promise<void>` | Stop streaming |
+| `onEvent(callback)` | `void` | Subscribe to all events |
+| `onPageEvent(type, callback)` | `void` | Subscribe to specific event type |
 
-Available, but not the primary product story:
+**Event types:**
 
-- `evaluate(expression, awaitPromise?)`
-- `evaluateVoid(expression)`
-- `screenshot(options?)`
-- `enableNetworkCapture()`
-- `getNetworkRequests(urlPattern?)`
-- tab management helpers
-- cookies and storage helpers
-- extension-backed session helpers
+| Type | Data | Description |
+|------|------|-------------|
+| `page.mutation` | `MutationEvent[]` | DOM changes (Added, Removed, Changed, TextChanged) |
+| `page.loaded` | `{ url, title, timestampMs }` | Page finished loading |
+| `page.navigated` | `{ url, previousUrl, timestampMs }` | Navigation occurred |
+| `page.focus` | `{ elementId, role, name, timestampMs }` | Focus changed |
+| `page.scroll` | `{ scrollX, scrollY, timestampMs }` | Page scrolled (200ms throttle) |
+| `page.resize` | `{ viewportWidth, viewportHeight, timestampMs }` | Viewport resized |
 
-## Observation & Page Events
+### Secondary API
 
-The SDK provides first-class observation of page events via `observe()`:
-
-```typescript
-import { TivanaClient, observe, act } from "tivana";
-
-const client = new TivanaClient();
-await client.connect("ws://localhost:9876");
-await client.createSession();
-await client.navigate("https://example.com");
-
-// Observe page events
-const stop = await observe(async (event) => {
-  console.log(`[${event.type}]`, event.data);
-
-  if (event.type === "page.loaded") {
-    const elements = await client.elements();
-    // Agent reasons about elements and decides...
-  }
-});
-
-// Later: stop()
-```
-
-Supported event types: `page.mutation`, `page.loaded`, `page.navigated`, `page.focus`, `page.scroll`, `page.resize`.
-
-You can filter to specific events:
-
-```typescript
-const stop = await observe(callback, {
-  events: ["page.loaded", "page.navigated"],
-});
-```
-
-For lower-level control, use the `TivanaClient` event API directly:
-
-```typescript
-await client.startObservation();
-client.onPageEvent("page.navigated", (event) => { ... });
-client.onEvent((event) => { ... }); // all events
-await client.stopObservation();
-```
-
-The legacy `onMutation(callback)` API continues to work for DOM mutation events only.
-
-## Targets
-
-The SDK supports semantic targets for actions:
-
-```typescript
-await client.click("e5");
-await client.click({ role: "button", label: "Continue" });
-await client.type("hello@example.com", "e3");
-```
-
-Prefer element IDs from `elements()` as the primary target model.
+| Method | Description |
+|--------|-------------|
+| `screenshot(options?)` | Capture page screenshot |
+| `enableNetworkCapture()` | Start capturing network requests |
+| `getNetworkRequests(pattern?)` | Get captured requests |
+| `listTabs()` | List open browser tabs |
+| `switchTab(tabId)` | Switch to tab |
+| `newTab(url?)` | Open new tab |
+| `closeTab(tabId)` | Close tab |
 
 ## Types
 
@@ -240,34 +163,25 @@ interface PageState {
 
 ```typescript
 interface Element {
-  id: string;
-  role: string;
-  name?: string;
-  value?: string;
+  id: string;           // Stable semantic ID (e.g. "e1", "e42")
+  role: string;         // Semantic role: "button", "a", "text", "select", "checkbox", etc.
+  name?: string;        // Accessible label
+  value?: string;       // Current value
   description?: string;
-  bounds?: {
+  bounds?: {            // Viewport coordinates
     x: number;
     y: number;
     width: number;
     height: number;
   };
-  styles?: {
-    fontFamily?: string;
-    fontSize?: string;
-    fontWeight?: string;
-    color?: string;
-    backgroundColor?: string;
-    border?: string;
-    display?: string;
-    visibility?: string;
-  };
+  visible: boolean;     // Computed from display, opacity, dimensions
+  interactable: boolean; // visible + enabled + hit-test
   focused: boolean;
   enabled: boolean;
   checked?: boolean;
   selected?: boolean;
   expanded?: boolean;
   required?: boolean;
-  children?: Element[];
 }
 ```
 
@@ -277,43 +191,71 @@ interface Element {
 interface ActionResult {
   success: boolean;
   pageState?: PageState;
-  data?: unknown;
   durationMs: number;
 }
 ```
 
-## Error Handling
+### PageEvent
 
-Errors are surfaced with structured codes:
+```typescript
+type PageEvent =
+  | { type: "page.mutation"; data: MutationEvent[] }
+  | { type: "page.loaded"; data: { url: string; title: string; timestampMs: number } }
+  | { type: "page.navigated"; data: { url: string; previousUrl?: string; timestampMs: number } }
+  | { type: "page.focus"; data: { elementId?: string; role?: string; name?: string; timestampMs: number } }
+  | { type: "page.scroll"; data: { scrollX: number; scrollY: number; timestampMs: number } }
+  | { type: "page.resize"; data: { viewportWidth: number; viewportHeight: number; timestampMs: number } };
+```
+
+## Extension-Backed Sessions
+
+For real browser tabs with cookies, auth, and extensions:
+
+```typescript
+const client = new TivanaClient({ url: "ws://localhost:9876" });
+await client.connect();
+
+// Attach to the tab controlled by the Chrome extension
+const ext = await client.request("session.fromExtension", {});
+```
+
+Requires the Tivana Chrome extension with a tab attached.
+
+## Auto-Reconnect
+
+The SDK automatically reconnects with exponential backoff (1s → 2s → 4s → max 30s) and queues commands during reconnect. No manual handling needed.
+
+## Error Handling
 
 ```typescript
 try {
   await client.click("e999");
 } catch (error) {
+  // Error: [element_not_found] Element e999 not found
   console.error(String(error));
 }
 ```
 
-Common categories:
-
-- protocol errors
-- session errors
-- browser errors
-- action errors
-- internal errors
+Error codes: `element_not_found`, `session_not_found`, `browser_disconnected`, `timeout`, `invalid_params`, `unknown_method`.
 
 ## Runtime
 
-The SDK requires the Tivana runtime to be running.
+The SDK requires the Tivana runtime. See the [project README](../../README.md) for build and run instructions.
 
 ```bash
-cd tivana/runtime
-cargo build --release
+# Build
+cd runtime && cargo build --release
+
+# Run
 ./target/release/tivana --port 9876
+./target/release/tivana --headless
+./target/release/tivana --connect 9222
 ```
 
-See the root [README.md](/Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/README.md) for the broader project direction.
+## Examples
+
+See [examples/](../../examples/) for 7 working demos covering exploration, agent loops, accessibility review, anomaly detection, form awareness, event streaming, and design token extraction.
 
 ## License
 
-MIT
+MIT © Mostrom LLC 2025

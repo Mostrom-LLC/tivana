@@ -37,16 +37,28 @@ bun install
 
 ### Run an example
 
+After installing the SDK (`npm install tivana` or linking locally):
+
 ```bash
-cd sdk/ts
-bun run ../../examples/01-observe-and-explore.ts
+# With bun (from repo root)
+bun run examples/01-observe-and-explore.ts
+
+# With tsx
+npx tsx examples/01-observe-and-explore.ts
 ```
 
-Or with the extension (for real browser sessions):
+For local development (without npm install):
+
+```bash
+cd sdk/ts && bun install && cd ../..
+bun run examples/01-observe-and-explore.ts
+```
+
+With the Chrome extension (for real browser sessions):
 
 ```bash
 # Start runtime, connect extension, then:
-bun run ../../examples/06-event-streaming.ts
+bun run examples/06-event-streaming.ts
 ```
 
 ## Design Philosophy
