@@ -83,6 +83,9 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Build SDK
         working-directory: sdk/ts
         run: |
