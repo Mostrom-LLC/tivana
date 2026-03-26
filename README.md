@@ -147,7 +147,7 @@ const client = new TivanaClient();
 await client.connect("ws://localhost:9876");
 await client.createSession();
 
-await client.navigate("https://example.com");
+await client.navigate("https://news.ycombinator.com");
 
 const page = await client.pageState();
 const elements = await client.elements();
@@ -156,7 +156,7 @@ console.log(page.url);
 console.log(elements.map((el) => `${el.id} ${el.role} ${el.name ?? ""}`));
 
 // Your agent decides what to do from the current page state.
-const target = elements.find((el) => el.role === "link" && el.name?.includes("More information"));
+const target = elements.find((el) => el.role === "link" && el.name?.includes("Hacker News"));
 
 if (target) {
   await client.click(target.id);

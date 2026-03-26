@@ -20,12 +20,12 @@ await client.connect();
 await client.createSession();
 
 // Perceive
-await client.navigate("https://example.com");
+await client.navigate("https://news.ycombinator.com");
 const page = await client.pageState();
 const elements = await client.elements();
 
 // Reason
-const link = elements.find(e => e.role === "a" && e.name?.includes("More"));
+const link = elements.find(e => e.role === "a" && e.name?.includes("new"));
 
 // Act
 if (link) await client.click(link.id);
@@ -44,7 +44,7 @@ import { TivanaClient } from "@mostrom/tivana";
 const client = new TivanaClient({ url: "ws://localhost:9876" });
 await client.connect();
 await client.createSession();
-await client.navigate("https://example.com");
+await client.navigate("https://news.ycombinator.com");
 
 for (let step = 0; step < 20; step++) {
   const [page, elements] = await Promise.all([

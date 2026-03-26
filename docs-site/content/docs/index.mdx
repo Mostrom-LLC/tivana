@@ -36,14 +36,14 @@ const client = new TivanaClient();
 await client.connect("ws://localhost:9876");
 await client.createSession();
 
-await client.navigate("https://example.com");
+await client.navigate("https://news.ycombinator.com");
 
 const page = await client.pageState();
 const elements = await client.elements();
 
 // Your agent decides what to do
 const target = elements.find(
-  (el) => el.role === "link" && el.name?.includes("More information")
+  (el) => el.role === "link" && el.name?.includes("Hacker News")
 );
 
 if (target) {
