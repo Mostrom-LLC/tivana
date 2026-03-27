@@ -178,6 +178,10 @@ pub struct ClickOptions {
     /// Modifier keys to hold
     #[serde(default)]
     pub modifiers: Vec<String>,
+
+    /// Human-like pacing delays
+    #[serde(default)]
+    pub pacing: PacingConfig,
 }
 
 impl Default for ClickOptions {
@@ -187,6 +191,7 @@ impl Default for ClickOptions {
             click_count: default_click_count(),
             delay_ms: 0,
             modifiers: Vec::new(),
+            pacing: PacingConfig::default(),
         }
     }
 }
@@ -200,7 +205,7 @@ fn default_click_count() -> u32 {
 }
 
 /// Type/input options
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypeOptions {
     /// Delay between keystrokes in ms
@@ -210,6 +215,114 @@ pub struct TypeOptions {
     /// Clear existing content first
     #[serde(default)]
     pub clear_first: bool,
+
+    /// Human-like pacing delays (applied before/after the full type sequence)
+    #[serde(default)]
+    pub pacing: PacingConfig,
+}
+
+impl Default for TypeOptions {
+    fn default() -> Self {
+        Self {
+            delay_ms: 0,
+            clear_first: false,
+            pacing: PacingConfig::default(),
+        }
+    }
+}
+
+/// Human-like pacing configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PacingConfig {
+    /// Minimum delay before action in milliseconds (default: 0)
+    #[serde(default)]
+    pub pre_delay_ms: u64,
+
+    /// Maximum delay before action in milliseconds (default: 0)
+    /// Actual delay is random between pre_delay_ms and this value
+    #[serde(default)]
+    pub pre_delay_max_ms: u64,
+
+    /// Minimum delay after action in milliseconds (default: 0)
+    #[serde(default)]
+    pub post_delay_ms: u64,
+
+    /// Maximum delay after action in milliseconds (default: 0)
+    #[serde(default)]
+    pub post_delay_max_ms: u64,
+}
+
+impl Default for PacingConfig {
+    fn default() -> Self {
+        Self {
+            pre_delay_ms: 0,
+            pre_delay_max_ms: 0,
+            post_delay_ms: 0,
+            post_delay_max_ms: 0,
+        }
+    }
+}
+
+impl PacingConfig {
+    /// Human-like preset: 200-800ms before, 100-400ms after
+    pub fn human() -> Self {
+        Self {
+            pre_delay_ms: 200,
+            pre_delay_max_ms: 800,
+            post_delay_ms: 100,
+            post_delay_max_ms: 400,
+        }
+    }
+
+    /// Apply pre-action delay
+    pub async fn pre_delay(&self) {
+        if self.pre_delay_max_ms > 0 {
+            let delay = if self.pre_delay_max_ms > self.pre_delay_ms {
+                let mut rng = rand::thread_rng();
+                rng.gen_range(self.pre_delay_ms..=self.pre_delay_max_ms)
+            } else {
+                self.pre_delay_ms
+            };
+            if delay > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+            }
+        }
+    }
+
+    /// Apply post-action delay
+    pub async fn post_delay(&self) {
+        if self.post_delay_max_ms > 0 {
+            let delay = if self.post_delay_max_ms > self.post_delay_ms {
+                let mut rng = rand::thread_rng();
+                rng.gen_range(self.post_delay_ms..=self.post_delay_max_ms)
+            } else {
+                self.post_delay_ms
+            };
+            if delay > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+            }
+        }
+    }
+}
+
+/// Options for fill action
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FillOptions {
+    /// Clear existing content before filling (default: true)
+    #[serde(default = "default_true")]
+    pub clear_first: bool,
+}
+
+impl Default for FillOptions {
+    fn default() -> Self {
+        Self { clear_first: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Scroll options
@@ -740,6 +853,8 @@ impl Actor {
         let start = std::time::Instant::now();
         info!(?target, ?options, "Clicking");
 
+        options.pacing.pre_delay().await;
+
         // Scroll element into view first, then re-resolve bounds
         Self::scroll_target_into_view(page, target).await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -804,6 +919,8 @@ impl Actor {
             result = result.with_page_state(state);
         }
 
+        options.pacing.post_delay().await;
+
         Ok(result)
     }
 
@@ -826,6 +943,8 @@ impl Actor {
     ) -> Result<ActionResult, TivanaError> {
         let start = std::time::Instant::now();
         info!(text_len = text.len(), ?target, ?options, "Typing");
+
+        options.pacing.pre_delay().await;
 
         // If target specified, click it first to focus
         if let Some(t) = target {
@@ -874,10 +993,103 @@ impl Actor {
         let duration = start.elapsed().as_millis() as u64;
         let page_state = Perceiver::page_state(page).await?;
 
-        Ok(ActionResult::success()
+        let result = ActionResult::success()
             .with_page_state(page_state)
             .with_data(serde_json::json!({
                 "typed": text.len()
+            }))
+            .with_duration(duration);
+
+        options.pacing.post_delay().await;
+
+        Ok(result)
+    }
+
+    /// Fill an element's value directly via JavaScript
+    ///
+    /// Unlike `type_text` which sends character-by-character CDP key events,
+    /// `fill` sets `element.value` directly and dispatches input/change events.
+    /// This is instant regardless of text length and avoids typing detection.
+    pub async fn fill(
+        page: &Arc<PageHandle>,
+        target: &ActionTarget,
+        value: &str,
+        options: &FillOptions,
+    ) -> Result<ActionResult, TivanaError> {
+        let start = std::time::Instant::now();
+        info!(value_len = value.len(), ?target, "Filling");
+
+        // If target specified, click it first to focus
+        if !target.is_empty() {
+            Self::click(page, target, &ClickOptions::default(), None).await?;
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+
+        // Resolve element — prefer element_id with data-tivana-id, fall back to selector
+        let selector = if let Some(ref eid) = target.element_id {
+            format!("[data-tivana-id=\"{}\"]", eid)
+        } else if let Some(ref sel) = target.selector {
+            sel.clone()
+        } else {
+            // Use activeElement as fallback
+            "null".to_string()
+        };
+
+        let clear_first = if options.clear_first { "true" } else { "false" };
+
+        let script = format!(
+            r#"(() => {{
+                const el = {} === "null"
+                    ? document.activeElement
+                    : document.querySelector({});
+                if (!el) return {{ success: false, error: "Element not found" }};
+
+                if ({}) {{
+                    el.value = '';
+                }}
+
+                // Set value using native setter to trigger React/Vue/etc.
+                const nativeSetter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, 'value'
+                )?.set || Object.getOwnPropertyDescriptor(
+                    window.HTMLTextAreaElement.prototype, 'value'
+                )?.set;
+
+                if (nativeSetter) {{
+                    nativeSetter.call(el, {});
+                }} else {{
+                    el.value = {};
+                }}
+
+                // Dispatch events frameworks listen for
+                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+
+                return {{ success: true, length: el.value.length }};
+            }})()"#,
+            serde_json::to_string(&selector).unwrap_or_default(),
+            serde_json::to_string(&selector).unwrap_or_default(),
+            clear_first,
+            serde_json::to_string(value).unwrap_or_default(),
+            serde_json::to_string(value).unwrap_or_default()
+        );
+
+        let result: serde_json::Value = page.evaluate(&script).await?;
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if !success {
+            let error = result.get("error").and_then(|v| v.as_str()).unwrap_or("Fill failed");
+            return Err(TivanaError::Browser(error.to_string()));
+        }
+
+        let duration = start.elapsed().as_millis() as u64;
+        let page_state = Perceiver::page_state(page).await?;
+
+        Ok(ActionResult::success()
+            .with_page_state(page_state)
+            .with_data(serde_json::json!({
+                "filled": true,
+                "length": value.len(),
             }))
             .with_duration(duration))
     }
@@ -1051,28 +1263,57 @@ impl Actor {
         let start = std::time::Instant::now();
         info!(?target, value, "Selecting");
 
-        if let Some(ref selector) = target.selector {
-            let script = format!(
-                r#"(() => {{
-                    const el = document.querySelector({});
-                    if (!el) return false;
+        // Resolve selector — from element_id OR direct selector
+        let selector = if let Some(ref eid) = target.element_id {
+            format!("[data-tivana-id=\"{}\"]", eid)
+        } else if let Some(ref sel) = target.selector {
+            sel.clone()
+        } else {
+            return Err(TivanaError::Browser(
+                "Select requires element ID or selector".to_string(),
+            ));
+        };
+
+        let script = format!(
+            r#"(() => {{
+                const el = document.querySelector({});
+                if (!el) return {{ success: false, error: "Element not found" }};
+
+                // Handle native <select>
+                if (el.tagName === 'SELECT') {{
                     el.value = {};
                     el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    return true;
-                }})()"#,
-                serde_json::to_string(selector).unwrap_or_default(),
-                serde_json::to_string(value).unwrap_or_default()
-            );
+                    return {{ success: true, selected: el.value }};
+                }}
 
-            let success: bool = page.evaluate(&script).await?;
-            if !success {
-                return Err(TivanaError::Browser(format!(
-                    "Select element not found: {}",
-                    selector
-                )));
-            }
-        } else {
-            return Err(TivanaError::Browser("Select requires selector".to_string()));
+                // Handle custom dropdowns — set value and dispatch
+                const nativeSetter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, 'value'
+                )?.set;
+                if (nativeSetter) {{
+                    nativeSetter.call(el, {});
+                }} else {{
+                    el.value = {};
+                }}
+                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return {{ success: true, selected: el.value }};
+            }})()"#,
+            serde_json::to_string(&selector).unwrap_or_default(),
+            serde_json::to_string(value).unwrap_or_default(),
+            serde_json::to_string(value).unwrap_or_default(),
+            serde_json::to_string(value).unwrap_or_default()
+        );
+
+        let result: serde_json::Value = page.evaluate(&script).await?;
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if !success {
+            let error = result.get("error").and_then(|v| v.as_str()).unwrap_or("Select failed");
+            return Err(TivanaError::Browser(format!(
+                "Select failed: {}",
+                error
+            )));
         }
 
         let duration = start.elapsed().as_millis() as u64;

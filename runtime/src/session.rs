@@ -453,6 +453,31 @@ impl SessionRegistry {
         f(session)
     }
 
+    /// Attach to an existing session by ID
+    ///
+    /// Verifies the session exists and is Active, then returns the session ID.
+    /// Does NOT create a new browser — reuses the existing one.
+    pub async fn attach(&self, session_id: &str) -> Result<String, TivanaError> {
+        let sessions = self.sessions.read().await;
+        match sessions.get(session_id) {
+            Some(session) => {
+                if session.state == SessionState::Active {
+                    info!(session_id, "Reattaching to existing session");
+                    Ok(session_id.to_string())
+                } else {
+                    Err(TivanaError::Session(format!(
+                        "Session {} is in {:?} state, cannot attach",
+                        session_id, session.state
+                    )))
+                }
+            }
+            None => Err(TivanaError::Session(format!(
+                "Session {} not found",
+                session_id
+            ))),
+        }
+    }
+
     /// Close and remove a session
     pub async fn close(&self, id: &str) -> Result<SessionInfo, ProtocolError> {
         let mut sessions = self.sessions.write().await;

@@ -18,7 +18,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 /// If no pong is received within this duration, consider the connection stale
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(300);
 
-use crate::act::{ActionTarget, Actor, BatchAction, ClickOptions, ScrollDirection, ScrollOptions, TypeOptions};
+use crate::act::{ActionTarget, Actor, BatchAction, ClickOptions, FillOptions, ScrollDirection, ScrollOptions, TypeOptions};
 use crate::browser::{BrowserLaunchConfig, BrowserManager};
 use crate::captcha::CaptchaSolver;
 use crate::cli::Args;
@@ -670,7 +670,7 @@ impl Server {
         // Skip interception for session management methods
         let skip_extension_check = matches!(
             request.method.as_str(),
-            "session.create" | "session.fromExtension" | "session.list" | "extension.tabs"
+            "session.create" | "session.fromExtension" | "session.list" | "session.attach" | "extension.tabs"
         );
         let maybe_session_id = request.session_id.as_deref()
             .or_else(|| request.params.get("sessionId").and_then(|v| v.as_str()));
@@ -691,6 +691,7 @@ impl Server {
             "session.create" => self.handle_session_create(&request).await,
             "session.close" => self.handle_session_close(&request).await,
             "session.list" => self.handle_session_list().await,
+            "session.attach" => self.handle_session_attach(&request).await,
             "session.tabs" => self.handle_session_tabs(&request).await,
             "session.switchTab" => self.handle_session_switch_tab(&request).await,
             "session.newTab" => self.handle_session_new_tab(&request).await,
@@ -727,6 +728,7 @@ impl Server {
             // Action methods
             "act.click" => self.handle_act_click(&request).await,
             "act.type" => self.handle_act_type(&request).await,
+            "act.fill" => self.handle_act_fill(&request).await,
             "act.press" => self.handle_act_press(&request).await,
             "act.scroll" => self.handle_act_scroll(&request).await,
             "act.navigate" => self.handle_browser_navigate(&request).await,
@@ -1262,7 +1264,7 @@ impl Server {
                 })).await.map_err(|e| ProtocolError::internal(e))?;
                 Ok(serde_json::json!({ "pressed": true }))
             }
-            "act.smartFill" | "act.fillForm" | "act.batch" => {
+            "act.smartFill" | "act.fillForm" | "act.batch" | "act.fill" => {
                 // Not yet supported for extension sessions — use evaluate as workaround
                 Ok(serde_json::json!({ "ok": true, "note": "Use evaluate for form operations in extension mode" }))
             }
@@ -2154,6 +2156,63 @@ impl Server {
             })?;
 
         Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    async fn handle_act_fill(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = self.extract_session_id(request)?;
+
+        let target = Self::parse_action_target(&request.params)
+            .ok_or_else(|| ProtocolError::missing_field("target"))?;
+
+        let value = request
+            .params
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("value"))?;
+
+        let options: FillOptions = request
+            .params
+            .get("options")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let page = self
+            .sessions
+            .get_page(&session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        let result = Actor::fill(&page, &target, value, &options)
+            .await
+            .map_err(|e| ProtocolError::new(crate::error::ErrorCode::ActionFailed, e.to_string()))?;
+
+        Ok(serde_json::to_value(&result).unwrap_or_default())
+    }
+
+    async fn handle_session_attach(
+        &self,
+        request: &crate::protocol::RequestMessage,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let session_id = request
+            .params
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProtocolError::missing_field("sessionId"))?;
+
+        let id = self
+            .sessions
+            .attach(session_id)
+            .await
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+
+        Ok(serde_json::json!({
+            "sessionId": id,
+            "status": "active",
+            "attached": true
+        }))
     }
 
     async fn handle_act_press(

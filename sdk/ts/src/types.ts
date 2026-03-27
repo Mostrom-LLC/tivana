@@ -420,6 +420,18 @@ export interface ActionTarget {
 export type ClickTarget = string | { role: string; label: string };
 
 /** Click options - matches Rust ClickOptions struct */
+/** Human-like pacing configuration */
+export interface PacingOptions {
+  /** Minimum delay before action (ms) */
+  preDelayMs?: number;
+  /** Maximum delay before action (ms) */
+  preDelayMaxMs?: number;
+  /** Minimum delay after action (ms) */
+  postDelayMs?: number;
+  /** Maximum delay after action (ms) */
+  postDelayMaxMs?: number;
+}
+
 export interface ClickOptions {
   /** Button: "left", "right", "middle" */
   button?: "left" | "right" | "middle";
@@ -432,6 +444,9 @@ export interface ClickOptions {
 
   /** Modifier keys to hold */
   modifiers?: string[];
+
+  /** Human-like pacing delays */
+  pacing?: PacingOptions;
 }
 
 /** Type options - matches Rust TypeOptions struct */
@@ -441,6 +456,9 @@ export interface TypeOptions {
 
   /** Clear existing content first */
   clearFirst?: boolean;
+
+  /** Human-like pacing delays */
+  pacing?: PacingOptions;
 }
 
 /** Scroll direction */
@@ -870,4 +888,7 @@ export interface ClientOptions {
 
   /** Callback invoked when reconnection succeeds */
   onReconnect?: () => void;
+
+  /** Enable debug logging for response inspection */
+  debug?: boolean;
 }

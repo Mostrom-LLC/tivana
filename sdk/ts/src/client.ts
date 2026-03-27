@@ -55,6 +55,7 @@ const DEFAULT_OPTIONS: Required<ClientOptions> = {
   reconnectDelay: 1000,
   maxReconnectDelay: 30000,
   onReconnect: () => {},
+  debug: false,
 };
 
 /** Pending request */
@@ -62,6 +63,7 @@ interface PendingRequest {
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
+  method: string;
 }
 
 /**
@@ -333,6 +335,13 @@ export class TivanaClient {
     clearTimeout(pending.timeout);
     this.pending.delete(message.id);
 
+    if (this.options.debug) {
+      console.debug(
+        `[tivana] Response for ${pending.method}:`,
+        JSON.stringify(message).substring(0, 200),
+      );
+    }
+
     if (message.error) {
       pending.reject(
         new Error(`[${message.error.code}] ${message.error.message}`)
@@ -385,6 +394,7 @@ export class TivanaClient {
         resolve: resolve as (result: unknown) => void,
         reject,
         timeout,
+        method,
       });
 
       const data = JSON.stringify(message);
@@ -404,7 +414,32 @@ export class TivanaClient {
   async createSession(params?: SessionCreateParams): Promise<string> {
     const result = await this.request<SessionCreateResult>(
       "session.create",
-      params || {}
+      params || {},
+    );
+    // Handle both camelCase and snake_case response shapes
+    const sessionId =
+      result.sessionId ||
+      (result as unknown as Record<string, unknown>).session_id;
+    if (!sessionId || typeof sessionId !== "string") {
+      throw new Error(
+        `createSession returned no sessionId. Response: ${JSON.stringify(result)}`,
+      );
+    }
+    this.sessionId = sessionId;
+    return this.sessionId;
+  }
+
+  /**
+   * Attach to an existing session by ID.
+   * Use this to reconnect to a browser that's still running
+   * after a previous connection was closed.
+   *
+   * @param sessionId The session ID to reattach to
+   */
+  async attachSession(sessionId: string): Promise<string> {
+    const result = await this.request<{ sessionId: string; status: string }>(
+      "session.attach",
+      { sessionId },
     );
     this.sessionId = result.sessionId;
     return this.sessionId;
@@ -748,6 +783,34 @@ export class TivanaClient {
       text,
       target: actionTarget,
       ...options,
+    });
+  }
+
+  /**
+   * Fill an element's value directly via JavaScript.
+   * Unlike `type()` which sends character-by-character key events,
+   * `fill()` sets the value instantly. Use for long text, textareas,
+   * or when speed matters more than simulating typing.
+   *
+   * @param value Text to fill
+   * @param target Element ID (e.g. "e5") or CSS selector
+   * @param options Fill options
+   */
+  async fill(
+    value: string,
+    target?: string,
+    options?: { clearFirst?: boolean }
+  ): Promise<ActionResult> {
+    const actionTarget: ActionTarget | undefined = target
+      ? target.startsWith("e") && /^e\d+$/.test(target)
+        ? { elementId: target }
+        : { selector: target }
+      : undefined;
+
+    return this.request<ActionResult>("act.fill", {
+      target: actionTarget,
+      value,
+      options,
     });
   }
 
