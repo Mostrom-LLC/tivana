@@ -262,6 +262,37 @@ async function handleCdpCommand(msg) {
   }
 
   if (targetTabId === null) {
+    // Self-healing: service worker may have restarted, losing in-memory state.
+    // Try to recover from chrome.storage.local + chrome.debugger.getTargets()
+    try {
+      const data = await chrome.storage.local.get("tivanaState");
+      if (data.tivanaState?.tabs) {
+        const targets = await chrome.debugger.getTargets();
+        for (const [tabIdStr, info] of Object.entries(data.tivanaState.tabs)) {
+          const tabId = parseInt(tabIdStr, 10);
+          if (info.sessionId === sessionId) {
+            const isAttached = targets.some(t => t.tabId === tabId && t.attached);
+            if (isAttached) {
+              // Rebuild in-memory state
+              attachedTabs.set(tabId, info);
+              targetTabId = tabId;
+              // Re-enable CDP domains
+              try { await chrome.debugger.sendCommand({ tabId }, "Runtime.enable"); } catch {}
+              try { await chrome.debugger.sendCommand({ tabId }, "Page.enable"); } catch {}
+              try { await chrome.debugger.sendCommand({ tabId }, "DOM.enable"); } catch {}
+              console.log(`[tivana] Self-healed: recovered tab ${tabId} for session ${sessionId}`);
+              updateBadge();
+              break;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log("[tivana] Self-heal failed:", e.message || e);
+    }
+  }
+
+  if (targetTabId === null) {
     wsSend({ id: msg.id, error: `No tab attached for session ${sessionId}` });
     return;
   }
