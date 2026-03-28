@@ -1290,6 +1290,22 @@ git commit -m "feat(atlas): add action engine ported from Tivana runtime"
 Create `browser/src/main/__tests__/tabs.test.ts`:
 ```typescript
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Mock Electron modules before importing TabManager
+vi.mock("electron", () => ({
+  WebContentsView: vi.fn().mockImplementation(() => ({
+    webContents: {
+      on: vi.fn(),
+      loadURL: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn(),
+      getURL: vi.fn().mockReturnValue("about:blank"),
+    },
+    setBounds: vi.fn(),
+    setVisible: vi.fn(),
+  })),
+  BrowserWindow: vi.fn(),
+}));
+
 import { TabManager } from "../tabs";
 
 function createMockBrowserWindow() {
@@ -1306,33 +1322,52 @@ function createMockBrowserWindow() {
 
 function createMockCDP() {
   return {
-    attach: vi.fn(),
+    attach: vi.fn().mockResolvedValue(undefined),
     detach: vi.fn(),
   } as any;
 }
 
-// Note: TabManager depends on Electron's WebContentsView which cannot be
-// fully unit tested. These tests verify the module exports and interface.
-// Full integration tests run in the Electron app.
-
 describe("TabManager", () => {
-  it("exports TabManager class", async () => {
-    const mod = await import("../tabs");
-    expect(mod.TabManager).toBeDefined();
-    expect(typeof mod.TabManager).toBe("function");
+  let win: any;
+  let cdp: any;
+  let tabs: TabManager;
+
+  beforeEach(() => {
+    win = createMockBrowserWindow();
+    cdp = createMockCDP();
+    tabs = new TabManager(win, cdp);
   });
 
-  it("TabManager has expected methods", () => {
-    // Verify the class prototype has the methods we need
-    const proto = TabManager.prototype;
-    expect(typeof proto.newTab).toBe("function");
-    expect(typeof proto.switchTo).toBe("function");
-    expect(typeof proto.closeTab).toBe("function");
-    expect(typeof proto.getActiveTab).toBe("function");
-    expect(typeof proto.getActiveWebContents).toBe("function");
-    expect(typeof proto.getAllTabs).toBe("function");
-    expect(typeof proto.setOnChange).toBe("function");
-    expect(typeof proto.relayout).toBe("function");
+  it("starts with no tabs", () => {
+    expect(tabs.getAllTabs()).toHaveLength(0);
+    expect(tabs.getActiveTab()).toBeNull();
+    expect(tabs.getActiveWebContents()).toBeNull();
+  });
+
+  it("has expected methods", () => {
+    expect(typeof tabs.newTab).toBe("function");
+    expect(typeof tabs.switchTo).toBe("function");
+    expect(typeof tabs.closeTab).toBe("function");
+    expect(typeof tabs.getActiveTab).toBe("function");
+    expect(typeof tabs.getActiveWebContents).toBe("function");
+    expect(typeof tabs.getAllTabs).toBe("function");
+    expect(typeof tabs.setOnChange).toBe("function");
+    expect(typeof tabs.relayout).toBe("function");
+  });
+
+  it("creates a new tab and sets it active", async () => {
+    const id = await tabs.newTab("https://example.com");
+    expect(id).toBeDefined();
+    expect(tabs.getAllTabs()).toHaveLength(1);
+    expect(tabs.getAllTabs()[0].active).toBe(true);
+    expect(cdp.attach).toHaveBeenCalled();
+  });
+
+  it("notifies onChange when tabs change", async () => {
+    const onChange = vi.fn();
+    tabs.setOnChange(onChange);
+    await tabs.newTab("https://example.com");
+    expect(onChange).toHaveBeenCalled();
   });
 });
 ```
