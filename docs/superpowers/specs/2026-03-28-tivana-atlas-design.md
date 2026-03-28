@@ -67,7 +67,7 @@ Returns:
 - `PageState` — URL, title, viewport dimensions, scroll position
 - `Element[]` — all interactive elements with: IDs, roles, labels, values, bounding boxes, visibility, interactability
 
-**Element IDs:** Integer IDs (e.g., 1, 2, 3) assigned sequentially during each `perceive()` call by the injected JS. IDs are **per-snapshot only** — they are regenerated on every perceive cycle. The agent loop always perceives before acting, so IDs are fresh. If a CDP action fails with "element not found," the agent re-perceives to get updated IDs.
+**Element IDs:** String IDs in "eN" format (e.g., "e1", "e2", "e3") assigned by a `WeakMap` + counter stored on `window.__tivana_element_map`, matching the Tivana runtime's existing scheme. IDs are **stable within a session** — the same DOM element keeps its ID across perceive calls via the WeakMap. If a CDP action fails with "element not found," the agent re-perceives to get updated IDs.
 
 **Actions (`actions.ts`):**
 
@@ -123,12 +123,12 @@ The loop ends when Gemini calls `done(summary)` or the user kills it.
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `navigate` | `url: string` | Go to a URL |
-| `click` | `id: number` | Click element by ID |
-| `type` | `id: number, text: string` | Type text into element |
-| `fill` | `id: number, value: string` | Set field value instantly |
+| `click` | `id: string` | Click element by ID (e.g., "e1") |
+| `type` | `id: string, text: string` | Type text into element |
+| `fill` | `id: string, value: string` | Set field value instantly |
 | `scroll` | `direction: "up"\|"down", amount?: number` | Scroll the page |
-| `select` | `id: number, value: string` | Select dropdown option |
-| `hover` | `id: number` | Hover over element |
+| `select` | `id: string, value: string` | Select dropdown option |
+| `hover` | `id: string` | Hover over element |
 | `screenshot` | — | Capture page screenshot (displayed in sidebar only, not sent to model — vision is out of scope for MVP) |
 | `wait` | `seconds: number` | Wait for async page updates |
 | `new_tab` | `url?: string` | Open a new tab |
