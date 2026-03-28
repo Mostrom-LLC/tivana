@@ -186,8 +186,18 @@ async function handleRuntimeMessage(data) {
       // Remove old entry if it exists
       attachedTabs.delete(tabId);
       
-      // Re-attach
-      await chrome.debugger.attach({ tabId }, "1.3");
+      // Try to attach — may already be attached
+      let alreadyAttached = false;
+      try {
+        await chrome.debugger.attach({ tabId }, "1.3");
+      } catch (attachErr) {
+        if (attachErr.message && attachErr.message.includes("already attached")) {
+          alreadyAttached = true;
+        } else {
+          throw attachErr;
+        }
+      }
+      
       const tab = await chrome.tabs.get(tabId);
       const targets = await chrome.debugger.getTargets();
       const target = targets.find(t => t.tabId === tabId);
@@ -215,7 +225,7 @@ async function handleRuntimeMessage(data) {
         params: info,
       });
       
-      wsSend({ id: msg.id, result: { reattached: true, ...info } });
+      wsSend({ id: msg.id, result: { reattached: true, alreadyAttached, ...info } });
     } catch (e) {
       wsSend({ id: msg.id, error: e.message || String(e) });
     }

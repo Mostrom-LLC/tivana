@@ -670,7 +670,7 @@ impl Server {
         // Skip interception for session management methods
         let skip_extension_check = matches!(
             request.method.as_str(),
-            "session.create" | "session.fromExtension" | "session.list" | "session.attach" | "extension.tabs"
+            "session.create" | "session.fromExtension" | "session.list" | "session.attach" | "extension.tabs" | "tab.reattach"
         );
         let maybe_session_id = request.session_id.as_deref()
             .or_else(|| request.params.get("sessionId").and_then(|v| v.as_str()));
@@ -702,6 +702,21 @@ impl Server {
             // Extension methods
             "session.fromExtension" => self.handle_session_from_extension(&request).await,
             "extension.tabs" => self.handle_extension_list_tabs().await,
+            "tab.reattach" => {
+                // Forward tab.reattach directly to the extension
+                let tab_id = match request.params.get("tabId").and_then(|v| v.as_i64()) {
+                    Some(id) => id,
+                    None => return ResponseMessage::error(id, ProtocolError::missing_field("tabId")),
+                };
+                let msg = serde_json::json!({
+                    "method": "tab.reattach",
+                    "params": { "tabId": tab_id }
+                });
+                match self.extension_manager.send_raw_command(msg).await {
+                    Ok(result) => Ok(result),
+                    Err(e) => Err(ProtocolError::internal(e)),
+                }
+            },
 
             // Browser methods
             "browser.navigate" => self.handle_browser_navigate(&request).await,
