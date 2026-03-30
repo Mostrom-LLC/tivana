@@ -241,6 +241,21 @@ export interface ToolResult {
   error?: string;
 }
 
+// --- File library types ---
+
+export interface StoredFile {
+  id: string;
+  name: string;
+  kind: "resume" | "cover_letter" | "transcript" | "portfolio" | "other";
+  mimeType: string;
+  path: string;
+  reusable: boolean;
+  summary?: string;
+  extractedText?: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
 // --- LLM types ---
 
 export interface LLMResponse {
@@ -299,6 +314,17 @@ export interface Tab {
   title: string;
   url: string;
   active: boolean;
+}
+
+export interface StoredFile {
+  id: string;
+  name: string;
+  kind: "resume" | "cover_letter" | "transcript" | "portfolio" | "other";
+  mimeType: string;
+  reusable: boolean;
+  summary?: string;
+  createdAt: string;
+  lastUsedAt?: string;
 }
 ```
 
@@ -978,6 +1004,25 @@ describe("Actions", () => {
     expect(evalCalls.length).toBeGreaterThan(0);
   });
 
+  it("uploadFile uses DOM.describeNode and DOM.setFileInputFiles", async () => {
+    cdp.send.mockImplementation((_wc: any, method: string) => {
+      if (method === "Runtime.evaluate") {
+        return { result: { objectId: "obj-123" } };
+      }
+      if (method === "DOM.describeNode") {
+        return { node: { backendNodeId: 456 } };
+      }
+      return {};
+    });
+
+    await actions.uploadFile(wc, "e1", "/path/to/resume.pdf");
+
+    expect(cdp.send).toHaveBeenCalledWith(wc, "DOM.setFileInputFiles", {
+      files: ["/path/to/resume.pdf"],
+      backendNodeId: 456,
+    });
+  });
+
   it("hover dispatches mouseMoved event", async () => {
     cdp.send.mockImplementation((_wc: any, method: string) => {
       if (method === "Runtime.evaluate") {
@@ -1199,6 +1244,43 @@ export class Actions {
       type: "mouseMoved",
       x: cx,
       y: cy,
+    });
+  }
+
+  /**
+   * Upload a file into a file input element.
+   * Ref: act.rs:721-800
+   * CDP pattern: Runtime.evaluate → DOM.describeNode → DOM.setFileInputFiles
+   */
+  async uploadFile(
+    wc: WebContents,
+    elementId: string,
+    filePath: string
+  ): Promise<void> {
+    // Find the element and get its RemoteObject
+    const evalResult = await this.cdp.send(wc, "Runtime.evaluate", {
+      expression: `document.querySelector('[data-tivana-id="${elementId}"]')`,
+    });
+
+    const objectId = evalResult.result?.objectId;
+    if (!objectId) {
+      throw new Error(`File input element not found: ${elementId}`);
+    }
+
+    // Get backendNodeId via DOM.describeNode
+    const describeResult = await this.cdp.send(wc, "DOM.describeNode", {
+      objectId,
+    });
+
+    const backendNodeId = describeResult.node?.backendNodeId;
+    if (!backendNodeId) {
+      throw new Error(`Could not resolve backend node for: ${elementId}`);
+    }
+
+    // Set the file on the input
+    await this.cdp.send(wc, "DOM.setFileInputFiles", {
+      files: [filePath],
+      backendNodeId,
     });
   }
 
@@ -1587,6 +1669,8 @@ describe("Gemini provider", () => {
     expect(toolNames).toContain("hover");
     expect(toolNames).toContain("screenshot");
     expect(toolNames).toContain("wait");
+    expect(toolNames).toContain("attach_file");
+    expect(toolNames).toContain("upload_file");
     expect(toolNames).toContain("new_tab");
     expect(toolNames).toContain("switch_tab");
     expect(toolNames).toContain("close_tab");
@@ -1646,6 +1730,8 @@ import type {
 export const SYSTEM_PROMPT = `You are an autonomous browser agent. You execute tasks without asking for confirmation. Use the provided tools to interact with the page. When you receive a task, do it. Do not ask "are you sure?" — the user already decided.
 
 You can see the page as a list of interactive elements with IDs, roles, labels, and values. Use the element IDs to target actions. If an element isn't in the list, it may not be visible — try scrolling.
+
+You may also receive a list of reusable local files the user has stored in Atlas. Use attach_file() when you need the contents of one for context, and use upload_file() when the page expects a file upload such as a resume.
 
 When the task is complete, call done() with a summary of what you accomplished.
 Only use ask_user() when you genuinely need information you cannot find on the page (e.g., a password, a preference not stated in the task).`;
@@ -1740,6 +1826,31 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         seconds: { type: "number", description: "Seconds to wait" },
       },
       required: ["seconds"],
+    },
+  },
+  {
+    name: "attach_file",
+    description:
+      "Attach a stored local file to the current task context for reasoning (e.g., read resume contents)",
+    parameters: {
+      type: "object",
+      properties: {
+        fileId: { type: "string", description: "ID of the stored file" },
+      },
+      required: ["fileId"],
+    },
+  },
+  {
+    name: "upload_file",
+    description:
+      "Upload a stored local file into a file input element on the page",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Element ID of the file input" },
+        fileId: { type: "string", description: "ID of the stored file" },
+      },
+      required: ["id", "fileId"],
     },
   },
   {
@@ -2024,6 +2135,11 @@ describe("AgentLoop", () => {
         closeTab: vi.fn(),
         getAllTabs: vi.fn().mockReturnValue([]),
       },
+      fileActions: {
+        getReusableFiles: vi.fn().mockReturnValue([]),
+        getFile: vi.fn().mockReturnValue(undefined),
+        markUsed: vi.fn(),
+      },
     });
   });
 
@@ -2116,6 +2232,7 @@ import type {
   AgentUsage,
   Element,
   PageState,
+  StoredFile,
 } from "./types";
 import type { Actions } from "./actions";
 import { TOOL_DEFINITIONS, calculateCost } from "./gemini";
@@ -2133,6 +2250,11 @@ export interface AgentConfig {
     switchTab: (index: number) => void;
     closeTab: (index: number) => void;
     getAllTabs: () => { id: string; title: string; url: string; active: boolean }[];
+  };
+  fileActions: {
+    getReusableFiles: () => StoredFile[];
+    getFile: (id: string) => StoredFile | undefined;
+    markUsed: (id: string) => void;
   };
 }
 
@@ -2431,6 +2553,30 @@ export class AgentLoop {
           this.config.tabActions.closeTab(args.index as number);
           return { name, success: true, result: `Closed tab ${args.index}` };
 
+        case "attach_file": {
+          const file = this.config.fileActions.getFile(String(args.fileId));
+          if (!file) {
+            return { name, success: false, error: `File not found: ${args.fileId}` };
+          }
+          this.config.fileActions.markUsed(file.id);
+          const content = file.extractedText || `[Binary file: ${file.name} (${file.mimeType})]`;
+          return {
+            name,
+            success: true,
+            result: `File "${file.name}" (${file.kind}):\n${content}`,
+          };
+        }
+
+        case "upload_file": {
+          const file = this.config.fileActions.getFile(String(args.fileId));
+          if (!file) {
+            return { name, success: false, error: `File not found: ${args.fileId}` };
+          }
+          await this.config.actions.uploadFile(wc!, String(args.id), file.path);
+          this.config.fileActions.markUsed(file.id);
+          return { name, success: true, result: `Uploaded "${file.name}" to ${args.id}` };
+        }
+
         case "done":
           return { name, success: true, result: String(args.summary) };
 
@@ -2466,6 +2612,12 @@ export class AgentLoop {
       .map((t, i) => `  [${i}] ${t.url} ${t.active ? "(active)" : ""}`)
       .join("\n");
 
+    // Include reusable files inventory
+    const files = this.config.fileActions.getReusableFiles();
+    const fileLines = files.length > 0
+      ? files.map((f) => `  [${f.id}] ${f.kind}: "${f.name}" (${f.mimeType})${f.summary ? ` — ${f.summary}` : ""}`).join("\n")
+      : "(no stored files)";
+
     return `Current page: ${pageState.url}
 Title: ${pageState.title}
 Viewport: ${pageState.viewportWidth}x${pageState.viewportHeight}
@@ -2473,6 +2625,9 @@ Scroll: (${pageState.scrollX}, ${pageState.scrollY}) of (${pageState.documentWid
 
 Open tabs:
 ${tabLines}
+
+Stored files:
+${fileLines}
 
 Interactive elements:
 ${elementLines || "(no interactive elements found)"}`;
@@ -2577,6 +2732,16 @@ contextBridge.exposeInMainWorld("atlas", {
   openSettings: () => ipcRenderer.send("settings:open"),
   saveSettings: (settings: { apiKey?: string; model?: string }) =>
     ipcRenderer.send("settings:save", settings),
+
+  // File library
+  addFiles: (paths: string[], reusable?: boolean, kind?: string) =>
+    ipcRenderer.send("files:add", { paths, reusable, kind }),
+  removeFile: (id: string) => ipcRenderer.send("files:remove", { id }),
+  onFilesUpdate: (cb: (files: any[]) => void) => {
+    const listener = (_event: any, files: any[]) => cb(files);
+    ipcRenderer.on("files:update", listener);
+    return () => ipcRenderer.removeListener("files:update", listener);
+  },
 
   // Main → Renderer (listeners)
   onAgentMessage: (cb: (msg: any) => void) => {
@@ -3552,7 +3717,500 @@ git commit -m "feat(atlas): add settings UI for API key and model selection"
 
 ---
 
-### Task 13: Final Integration Test
+### Task 13: File Library
+
+**Files:**
+- Create: `browser/src/main/files.ts`
+- Create: `browser/src/main/__tests__/files.test.ts`
+- Create: `browser/src/renderer/components/FileLibrary.tsx`
+- Modify: `browser/src/main/ipc.ts`
+- Modify: `browser/src/main/index.ts`
+- Modify: `browser/src/renderer/App.tsx`
+- Modify: `browser/src/renderer/hooks/useAtlas.ts`
+
+**Reference:** Spec section "Local File Library (`files.ts`)"
+
+- [ ] **Step 1: Write file library tests**
+
+Create `browser/src/main/__tests__/files.test.ts`:
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { FileLibrary } from "../files";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+
+describe("FileLibrary", () => {
+  let lib: FileLibrary;
+  let storageDir: string;
+
+  beforeEach(() => {
+    storageDir = path.join(os.tmpdir(), `atlas-files-test-${Date.now()}`);
+    lib = new FileLibrary(storageDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(storageDir, { recursive: true, force: true });
+  });
+
+  it("adds a file and returns its metadata", async () => {
+    // Create a temp file to import
+    const tmpFile = path.join(os.tmpdir(), "test-resume.txt");
+    fs.writeFileSync(tmpFile, "John Doe - Software Engineer");
+
+    const file = await lib.addFile(tmpFile, {
+      reusable: true,
+      kind: "resume",
+    });
+
+    expect(file.id).toBeDefined();
+    expect(file.name).toBe("test-resume.txt");
+    expect(file.kind).toBe("resume");
+    expect(file.reusable).toBe(true);
+    expect(file.mimeType).toBe("text/plain");
+    expect(file.extractedText).toBe("John Doe - Software Engineer");
+
+    fs.unlinkSync(tmpFile);
+  });
+
+  it("lists reusable files only", async () => {
+    const tmp1 = path.join(os.tmpdir(), "reusable.txt");
+    const tmp2 = path.join(os.tmpdir(), "onetime.txt");
+    fs.writeFileSync(tmp1, "reusable");
+    fs.writeFileSync(tmp2, "onetime");
+
+    await lib.addFile(tmp1, { reusable: true, kind: "resume" });
+    await lib.addFile(tmp2, { reusable: false, kind: "other" });
+
+    const reusable = lib.getReusableFiles();
+    expect(reusable).toHaveLength(1);
+    expect(reusable[0].name).toBe("reusable.txt");
+
+    fs.unlinkSync(tmp1);
+    fs.unlinkSync(tmp2);
+  });
+
+  it("gets a file by ID", async () => {
+    const tmp = path.join(os.tmpdir(), "findme.txt");
+    fs.writeFileSync(tmp, "content");
+
+    const added = await lib.addFile(tmp, { reusable: true, kind: "other" });
+    const found = lib.getFile(added.id);
+    expect(found?.id).toBe(added.id);
+
+    fs.unlinkSync(tmp);
+  });
+
+  it("removes a file", async () => {
+    const tmp = path.join(os.tmpdir(), "removeme.txt");
+    fs.writeFileSync(tmp, "content");
+
+    const added = await lib.addFile(tmp, { reusable: true, kind: "other" });
+    lib.removeFile(added.id);
+
+    expect(lib.getFile(added.id)).toBeUndefined();
+    expect(lib.getAllFiles()).toHaveLength(0);
+
+    fs.unlinkSync(tmp);
+  });
+
+  it("marks a file as used", async () => {
+    const tmp = path.join(os.tmpdir(), "useme.txt");
+    fs.writeFileSync(tmp, "content");
+
+    const added = await lib.addFile(tmp, { reusable: true, kind: "other" });
+    expect(added.lastUsedAt).toBeUndefined();
+
+    lib.markUsed(added.id);
+    const updated = lib.getFile(added.id);
+    expect(updated?.lastUsedAt).toBeDefined();
+
+    fs.unlinkSync(tmp);
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```bash
+cd /Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/browser
+npx vitest run src/main/__tests__/files.test.ts
+```
+
+Expected: FAIL — `FileLibrary` not found.
+
+- [ ] **Step 3: Implement FileLibrary**
+
+Create `browser/src/main/files.ts`:
+```typescript
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import type { StoredFile } from "./types";
+
+/**
+ * Local file library for user-provided assets (resumes, cover letters, etc.).
+ * Files are copied into Atlas-managed storage and metadata is persisted as JSON.
+ */
+export class FileLibrary {
+  private files: Map<string, StoredFile> = new Map();
+  private storageDir: string;
+  private metadataPath: string;
+
+  constructor(storageDir: string) {
+    this.storageDir = storageDir;
+    this.metadataPath = path.join(storageDir, "files.json");
+
+    // Ensure storage directory exists
+    fs.mkdirSync(storageDir, { recursive: true });
+
+    // Load existing metadata
+    this.loadMetadata();
+  }
+
+  /**
+   * Import a file into the library. Copies the file to managed storage.
+   */
+  async addFile(
+    sourcePath: string,
+    options: {
+      reusable?: boolean;
+      kind?: StoredFile["kind"];
+      summary?: string;
+    } = {}
+  ): Promise<StoredFile> {
+    const id = crypto.randomUUID();
+    const name = path.basename(sourcePath);
+    const ext = path.extname(name).toLowerCase();
+    const mimeType = this.guessMimeType(ext);
+
+    // Copy file to managed storage
+    const destPath = path.join(this.storageDir, `${id}${ext}`);
+    fs.copyFileSync(sourcePath, destPath);
+
+    // Extract text for text-based files
+    let extractedText: string | undefined;
+    if ([".txt", ".md", ".json", ".csv"].includes(ext)) {
+      try {
+        extractedText = fs.readFileSync(destPath, "utf-8");
+      } catch {
+        // Extraction failed — file still stored
+      }
+    }
+
+    const file: StoredFile = {
+      id,
+      name,
+      kind: options.kind ?? "other",
+      mimeType,
+      path: destPath,
+      reusable: options.reusable ?? false,
+      summary: options.summary,
+      extractedText,
+      createdAt: new Date().toISOString(),
+    };
+
+    this.files.set(id, file);
+    this.saveMetadata();
+    return file;
+  }
+
+  getFile(id: string): StoredFile | undefined {
+    return this.files.get(id);
+  }
+
+  getAllFiles(): StoredFile[] {
+    return Array.from(this.files.values());
+  }
+
+  getReusableFiles(): StoredFile[] {
+    return this.getAllFiles().filter((f) => f.reusable);
+  }
+
+  removeFile(id: string): void {
+    const file = this.files.get(id);
+    if (file) {
+      // Delete the stored copy
+      try {
+        fs.unlinkSync(file.path);
+      } catch {
+        // File may already be gone
+      }
+      this.files.delete(id);
+      this.saveMetadata();
+    }
+  }
+
+  markUsed(id: string): void {
+    const file = this.files.get(id);
+    if (file) {
+      file.lastUsedAt = new Date().toISOString();
+      this.saveMetadata();
+    }
+  }
+
+  private guessMimeType(ext: string): string {
+    const types: Record<string, string> = {
+      ".pdf": "application/pdf",
+      ".doc": "application/msword",
+      ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ".txt": "text/plain",
+      ".md": "text/markdown",
+      ".json": "application/json",
+      ".csv": "text/csv",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+    };
+    return types[ext] ?? "application/octet-stream";
+  }
+
+  private loadMetadata(): void {
+    try {
+      const data = fs.readFileSync(this.metadataPath, "utf-8");
+      const files: StoredFile[] = JSON.parse(data);
+      for (const f of files) {
+        // Only load files that still exist on disk
+        if (fs.existsSync(f.path)) {
+          this.files.set(f.id, f);
+        }
+      }
+    } catch {
+      // No metadata yet — fresh library
+    }
+  }
+
+  private saveMetadata(): void {
+    const data = JSON.stringify(this.getAllFiles(), null, 2);
+    fs.writeFileSync(this.metadataPath, data);
+  }
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+```bash
+cd /Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/browser
+npx vitest run src/main/__tests__/files.test.ts
+```
+
+Expected: All tests PASS.
+
+- [ ] **Step 5: Add file IPC handlers to `ipc.ts`**
+
+Add to the `setupIPC` function in `browser/src/main/ipc.ts`:
+```typescript
+// In the IPCDeps interface, add:
+  fileLibrary: FileLibrary;
+
+// In setupIPC, add these handlers:
+  ipcMain.on("files:add", async (_event, { paths, reusable, kind }) => {
+    for (const filePath of paths) {
+      await deps.fileLibrary.addFile(filePath, { reusable: reusable ?? true, kind });
+    }
+    sendToRenderer(win, "files:update", deps.fileLibrary.getAllFiles());
+  });
+
+  ipcMain.on("files:remove", (_event, { id }) => {
+    deps.fileLibrary.removeFile(id);
+    sendToRenderer(win, "files:update", deps.fileLibrary.getAllFiles());
+  });
+```
+
+- [ ] **Step 6: Wire FileLibrary in main process `index.ts`**
+
+Add to `browser/src/main/index.ts`:
+```typescript
+import { FileLibrary } from "./files";
+
+// After app.getPath("userData") is available:
+const fileLibrary = new FileLibrary(
+  path.join(app.getPath("userData"), "atlas-files")
+);
+
+// Pass to setupIPC:
+  fileLibrary,
+
+// Pass to createAgent's config:
+  fileActions: {
+    getReusableFiles: () => fileLibrary.getReusableFiles(),
+    getFile: (id) => fileLibrary.getFile(id),
+    markUsed: (id) => fileLibrary.markUsed(id),
+  },
+```
+
+- [ ] **Step 7: Create FileLibrary UI component**
+
+Create `browser/src/renderer/components/FileLibrary.tsx`:
+```tsx
+import type { StoredFile } from "../types";
+
+interface Props {
+  files: StoredFile[];
+  onAddFiles: () => void;
+  onRemove: (id: string) => void;
+  onClose: () => void;
+}
+
+const KIND_LABELS: Record<StoredFile["kind"], string> = {
+  resume: "Resume",
+  cover_letter: "Cover Letter",
+  transcript: "Transcript",
+  portfolio: "Portfolio",
+  other: "Other",
+};
+
+export function FileLibrary({ files, onAddFiles, onRemove, onClose }: Props) {
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-gray-900 rounded-lg p-6 w-[480px] max-h-[600px] border border-gray-700 flex flex-col">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-medium text-gray-100">File Library</h2>
+          <button
+            onClick={onClose}
+            className="text-gray-500 hover:text-gray-200"
+          >
+            &times;
+          </button>
+        </div>
+
+        <p className="text-sm text-gray-400 mb-4">
+          Files stored here are available to the agent for form filling and
+          uploads. Reusable files persist across tasks.
+        </p>
+
+        <div className="flex-1 overflow-y-auto space-y-2 mb-4">
+          {files.length === 0 ? (
+            <p className="text-gray-500 text-sm text-center py-8">
+              No files yet. Add a resume, cover letter, or other document.
+            </p>
+          ) : (
+            files.map((file) => (
+              <div
+                key={file.id}
+                className="flex items-center justify-between bg-gray-800 rounded-md px-3 py-2"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-gray-200 truncate">
+                    {file.name}
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    {KIND_LABELS[file.kind]} &middot; {file.mimeType}
+                    {file.lastUsedAt &&
+                      ` &middot; Last used ${new Date(file.lastUsedAt).toLocaleDateString()}`}
+                  </div>
+                </div>
+                <button
+                  onClick={() => onRemove(file.id)}
+                  className="text-gray-500 hover:text-red-400 text-xs ml-2"
+                >
+                  Remove
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+
+        <button
+          onClick={onAddFiles}
+          className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium"
+        >
+          Add Files...
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 8: Add file library to useAtlas hook and App.tsx**
+
+In `browser/src/renderer/hooks/useAtlas.ts`, add:
+```typescript
+const [files, setFiles] = useState<StoredFile[]>([]);
+
+// In useEffect:
+window.atlas.onFilesUpdate(setFiles),
+
+// Return:
+files,
+addFiles: window.atlas.addFiles,
+removeFile: window.atlas.removeFile,
+```
+
+In `browser/src/renderer/App.tsx`, add a file library button (e.g., in the status bar or sidebar) and the `FileLibrary` modal:
+```tsx
+const [showFiles, setShowFiles] = useState(false);
+
+// Add file button to StatusBar or sidebar:
+<button onClick={() => setShowFiles(true)}>Files</button>
+
+// Render modal:
+{showFiles && (
+  <FileLibrary
+    files={atlas.files}
+    onAddFiles={() => {
+      // Use Electron's dialog via IPC to pick files
+      // For MVP: expose a pickFiles IPC that opens dialog.showOpenDialog
+    }}
+    onRemove={(id) => window.atlas.removeFile(id)}
+    onClose={() => setShowFiles(false)}
+  />
+)}
+```
+
+Note: The "Add Files" button needs to trigger `dialog.showOpenDialog` in the main process. Add a `files:pick` IPC channel: renderer sends `files:pick`, main opens the native file picker dialog, imports selected files, and sends back `files:update`.
+
+Add to `ipc.ts`:
+```typescript
+ipcMain.handle("files:pick", async () => {
+  const { dialog } = require("electron");
+  const result = await dialog.showOpenDialog(win, {
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      { name: "Documents", extensions: ["pdf", "doc", "docx", "txt", "md"] },
+      { name: "All Files", extensions: ["*"] },
+    ],
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    for (const filePath of result.filePaths) {
+      await deps.fileLibrary.addFile(filePath, { reusable: true });
+    }
+    sendToRenderer(win, "files:update", deps.fileLibrary.getAllFiles());
+  }
+});
+```
+
+Add to preload:
+```typescript
+pickFiles: () => ipcRenderer.invoke("files:pick"),
+```
+
+- [ ] **Step 9: Verify file library works end-to-end**
+
+```bash
+cd /Volumes/Samsung/repositories/mostrom/node-package-manager/tivana/browser
+npm start
+```
+
+1. Open File Library from the UI
+2. Click "Add Files", select a `.txt` or `.pdf` file
+3. File appears in the library list
+4. Start a task that involves file upload (e.g., on a test form)
+5. Agent should use `upload_file` to populate the file input
+
+- [ ] **Step 10: Commit**
+
+```bash
+cd /Volumes/Samsung/repositories/mostrom/node-package-manager/tivana
+git add browser/src/main/files.ts browser/src/main/__tests__/files.test.ts browser/src/renderer/components/FileLibrary.tsx
+git add browser/src/main/ipc.ts browser/src/main/index.ts browser/src/renderer/App.tsx browser/src/renderer/hooks/useAtlas.ts
+git commit -m "feat(atlas): add local file library with attach_file and upload_file tools"
+```
+
+---
+
+### Task 14: Final Integration Test
 
 **Files:** None created — this is a manual verification task.
 
@@ -3582,13 +4240,21 @@ npm start
 3. Verify agent stops, "Resume" button appears
 4. Click Resume — agent continues from current page state
 
-- [ ] **Step 4: Error handling test**
+- [ ] **Step 4: File library test**
+
+1. Open File Library, add a `.txt` file
+2. Verify file appears in the library
+3. Start task: "Upload my resume to the file input on this page"
+4. Verify agent uses `upload_file` tool
+5. Remove the file from the library, verify it disappears
+
+- [ ] **Step 5: Error handling test**
 
 1. Set an invalid API key in Settings
 2. Start a task
 3. Verify error message appears in sidebar: "API key error..."
 
-- [ ] **Step 5: Commit final state**
+- [ ] **Step 6: Commit final state**
 
 ```bash
 cd /Volumes/Samsung/repositories/mostrom/node-package-manager/tivana
