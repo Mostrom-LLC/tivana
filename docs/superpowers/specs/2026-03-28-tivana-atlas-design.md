@@ -2,6 +2,7 @@
 
 **Date:** 2026-03-28
 **Status:** Approved
+**Canonical Status:** This is the source of truth for Atlas MVP requirements and architecture. Earlier Atlas planning docs are archived and should point here.
 
 ---
 
@@ -16,6 +17,8 @@ Tivana Atlas is an Electron-based AI-controlled browser. A user gives the agent 
 3. **Kill switch as only safety** — user can instantly halt the agent and optionally resume
 4. **BYOK** — user provides their own Gemini API key, stored securely in the OS keychain
 5. **Transparency** — user watches the browser in real time and reads the agent's reasoning in the sidebar
+6. **Complete browser capability** — Atlas must expose enough browser tools for the agent to finish real tasks inside the embedded Electron browser
+7. **Reusable local files** — user-uploaded files can be stored locally, attached for context, and reused in future tasks
 
 ---
 
@@ -131,6 +134,8 @@ The loop ends when Gemini calls `done(summary)` or the user kills it.
 | `hover` | `id: string` | Hover over element |
 | `screenshot` | — | Capture page screenshot (displayed in sidebar only, not sent to model — vision is out of scope for MVP) |
 | `wait` | `seconds: number` | Wait for async page updates |
+| `attach_file` | `fileId: string` | Attach a stored local file to the current task context |
+| `upload_file` | `id: string, fileId: string` | Upload a stored local file into a file input element |
 | `new_tab` | `url?: string` | Open a new tab |
 | `switch_tab` | `index: number` | Switch to tab by index |
 | `close_tab` | `index: number` | Close a tab |
@@ -149,6 +154,10 @@ receive a task, do it. Do not ask "are you sure?" — the user already decided.
 You can see the page as a list of interactive elements with IDs, roles, labels,
 and values. Use the element IDs to target actions. If an element isn't in the
 list, it may not be visible — try scrolling.
+
+You may also receive a list of reusable local files the user has stored in
+Atlas. Use attach_file() when you need the contents of one for context, and
+use upload_file() when the page expects a file upload such as a resume.
 
 When the task is complete, call done() with a summary of what you accomplished.
 Only use ask_user() when you genuinely need information you cannot find on the
@@ -180,6 +189,46 @@ interface LLMResponse {
 ```
 
 MVP only implements `GeminiProvider`. Adding OpenAI, Anthropic, Ollama later is just a new class implementing this interface.
+
+---
+
+## Local File Library (`files.ts`)
+
+Atlas includes a local file library for user-provided assets such as resumes,
+cover letters, transcripts, and portfolios.
+
+**Behavior:**
+
+- Users can add files from the UI and mark them reusable
+- Files are copied into Atlas-managed local storage under the app data directory
+- File metadata is persisted locally; files are never uploaded anywhere except when the active task explicitly uses `upload_file`
+- Reusable files remain available across tasks, so the user does not need to re-upload the same resume for every application
+- At task start, Gemini receives a compact inventory of reusable files: `id`, `name`, `kind`, `mimeType`, `summary`
+- `attach_file(fileId)` adds extracted text and file metadata to the current task context
+- `upload_file(elementId, fileId)` resolves the stored file path and uses the browser action layer to populate a file input
+
+**Stored file model:**
+
+```typescript
+interface StoredFile {
+  id: string;
+  name: string;
+  kind: "resume" | "cover_letter" | "transcript" | "portfolio" | "other";
+  mimeType: string;
+  path: string;
+  reusable: boolean;
+  summary?: string;
+  extractedText?: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+```
+
+**Extraction rules:**
+
+- Text-based files (`.txt`, `.md`, `.json`) are stored with full text
+- PDF/DOCX support is best-effort for extracted text; if extraction fails, Atlas still stores and uploads the original file
+- The agent should prefer `attach_file` only when the file content is relevant to reasoning; it should prefer `upload_file` when the page requires the file itself
 
 ---
 
@@ -222,6 +271,7 @@ Atlas-style layout. Browser on the left, chat sidebar on the right.
 - **Chat Sidebar** — streaming agent messages showing what it's doing and why. Scrollable history. Collapsible.
 - **Kill Switch** — always visible red button. `Cmd+Shift+K` / `Ctrl+Shift+K` keyboard shortcut. Instantly halts the agent loop. Becomes a "Resume" button after activation.
 - **Task Input** — text field at the bottom of the sidebar. Type a goal, press Enter, agent starts.
+- **File Library** — sidebar panel or modal where users add files, mark them reusable, and see stored assets available to the agent
 - **Status Bar** — token usage, cost, current model, connection indicator.
 
 **Styling:** Tailwind CSS. Dark theme matching Atlas aesthetic.
@@ -256,6 +306,7 @@ Communication between main process and renderer via Electron's `ipcMain`/`ipcRen
 | `agent:usage` | `{ inputTokens: number, outputTokens: number, cost: number }` | Updated token/cost totals |
 | `tabs:update` | `Tab[]` | Full tab list (id, title, url, active) |
 | `navigation:url` | `{ url: string }` | Active tab URL changed |
+| `files:update` | `StoredFile[]` | Current local file inventory |
 
 **Renderer → Main (user actions):**
 
@@ -274,6 +325,8 @@ Communication between main process and renderer via Electron's `ipcMain`/`ipcRen
 | `navigation:refresh` | — | Refresh button |
 | `settings:open` | — | Open settings |
 | `settings:save` | `{ apiKey?: string, model?: string }` | Save settings |
+| `files:add` | `{ paths: string[], reusable?: boolean, kind?: StoredFile["kind"] }` | Import files into the local library |
+| `files:remove` | `{ id: string }` | Delete a stored file |
 
 ---
 
@@ -307,6 +360,7 @@ Minimal settings page (accessible from sidebar gear icon):
 - **API Key** — Gemini API key input, stored via `safeStorage`
 - **Model** — dropdown to select Gemini model variant
 - **Sidebar width** — resizable by dragging the divider
+- **File Library** — manage reusable local files available to the agent
 
 No other settings for MVP.
 
@@ -341,6 +395,7 @@ browser/
 │   │   ├── perception.ts        # Element extraction via JS injection
 │   │   ├── actions.ts           # Click, type, fill, scroll, navigate
 │   │   ├── agent.ts             # Agent loop (perceive → reason → act)
+│   │   ├── files.ts             # Local file library + attachment handling
 │   │   ├── gemini.ts            # Gemini API client + tool definitions
 │   │   ├── tabs.ts              # Tab lifecycle management
 │   │   └── ipc.ts               # IPC handlers for renderer ↔ main
@@ -349,6 +404,7 @@ browser/
 │       ├── App.tsx
 │       ├── components/
 │       │   ├── Sidebar.tsx      # Chat messages + kill switch + task input
+│       │   ├── FileLibrary.tsx  # Stored reusable files
 │       │   ├── TabBar.tsx       # Tab strip
 │       │   ├── UrlBar.tsx       # URL bar + nav buttons
 │       │   └── StatusBar.tsx    # Tokens, cost, model
